@@ -1,0 +1,9 @@
+selenium>=4.15.0
+undetected-chromedriver>=3.5.5
+webdriver-manager>=4.0.1
+requests>=2.31.0
+python-telegram-bot>=20.0
+pyperclip>=1.8.2
+flask>=3.0.0
+redis>=5.0.0
+psycopg2-binary>=2.9.9
