@@ -233,9 +233,32 @@ def _parse_ints(text: str) -> set:
     return {int(x) for x in re.findall(r"\d+", str(text or ""))}
 
 
+def _ensure_executable(path: str) -> bool:
+    candidate = str(path or "").strip()
+    if not candidate or not os.path.isfile(candidate):
+        return False
+
+    if os.name == "nt":
+        return True
+
+    if os.access(candidate, os.X_OK):
+        return True
+
+    try:
+        mode = os.stat(candidate).st_mode
+        os.chmod(candidate, mode | 0o111)
+    except Exception:
+        return False
+
+    return os.access(candidate, os.X_OK)
+
+
 def _chrome_child_pids(chromedriver_pid: int) -> set:
     pids = set()
     if not chromedriver_pid:
+        return pids
+
+    if os.name != "nt":
         return pids
 
     # Prefer WMIC first (widely available on older Windows installs), fallback to PowerShell.
@@ -422,9 +445,31 @@ def _maximize_and_focus_browser(driver):
 
 def _detect_chrome_version() -> int:
     """
-    Auto-detect the installed Chrome major version.
+    Auto-detect the installed Chrome major version across Windows/macOS/Linux.
     Falls back to 145 if detection fails.
     """
+    def _parse_major_version(text: str):
+        match = re.search(r"(\d+)\.", str(text or ""))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except Exception:
+            return None
+
+    def _run_version_command(command):
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except Exception:
+            return None
+
+        return _parse_major_version(f"{result.stdout}\n{result.stderr}")
+
     try:
         # Windows: query registry for Chrome version
         result = subprocess.run(
@@ -432,24 +477,48 @@ def _detect_chrome_version() -> int:
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
-            match = re.search(r'(\d+)\.', result.stdout)
-            if match:
-                version = int(match.group(1))
+            version = _parse_major_version(result.stdout)
+            if version:
                 logger.info(f"[Browser] Detected Chrome version: {version}")
                 return version
     except Exception:
         pass
 
-    try:
-        # Fallback: try running chrome --version
-        result = subprocess.run(
-            ['chrome', '--version'], capture_output=True, text=True, timeout=5
-        )
-        match = re.search(r'(\d+)\.', result.stdout)
-        if match:
-            return int(match.group(1))
-    except Exception:
-        pass
+    version_commands = []
+
+    chrome_binary_override = str(os.environ.get("CHROME_BINARY", "") or "").strip()
+    if chrome_binary_override:
+        version_commands.append([chrome_binary_override, "--version"])
+
+    version_commands.extend(
+        [
+            ["chrome", "--version"],
+            ["google-chrome", "--version"],
+            ["google-chrome-stable", "--version"],
+            ["chromium", "--version"],
+            ["chromium-browser", "--version"],
+        ]
+    )
+
+    mac_binaries = [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    for mac_binary in mac_binaries:
+        if os.path.isfile(mac_binary):
+            version_commands.append([mac_binary, "--version"])
+
+    seen = set()
+    for command in version_commands:
+        command_key = tuple(command)
+        if command_key in seen:
+            continue
+        seen.add(command_key)
+
+        version = _run_version_command(command)
+        if version:
+            logger.info(f"[Browser] Detected Chrome version: {version}")
+            return version
 
     logger.info("[Browser] Could not detect Chrome version, defaulting to 145")
     return 145
@@ -470,13 +539,17 @@ def _resolve_chromedriver_path() -> str:
         if not candidate:
             continue
 
-        if os.path.isfile(candidate):
+        if _ensure_executable(candidate):
             return candidate
+
+        if os.path.isfile(candidate):
+            logger.warning(f"[Browser] Ignoring non-executable ChromeDriver path: {candidate}")
+            continue
 
         logger.warning(f"[Browser] Ignoring missing ChromeDriver path: {candidate}")
 
     discovered_from_path = shutil.which("chromedriver")
-    if discovered_from_path and os.path.isfile(discovered_from_path):
+    if discovered_from_path and _ensure_executable(discovered_from_path):
         return discovered_from_path
 
     if os.name == "nt":
@@ -530,6 +603,38 @@ def _resolve_chromedriver_path() -> str:
                 logger.info(f"[Browser] Auto-discovered ChromeDriver path: {auto_path}")
                 return auto_path
 
+    home_dir = str(os.path.expanduser("~") or "").strip()
+    posix_direct_candidates = [
+        "/opt/homebrew/bin/chromedriver",
+        "/usr/local/bin/chromedriver",
+    ]
+    for candidate in posix_direct_candidates:
+        if _ensure_executable(candidate):
+            logger.info(f"[Browser] Auto-discovered ChromeDriver path: {candidate}")
+            return candidate
+
+    posix_patterns = []
+    if home_dir:
+        posix_patterns = [
+            os.path.join(home_dir, ".wdm", "drivers", "chromedriver", "**", "chromedriver"),
+            os.path.join(home_dir, ".cache", "selenium", "chromedriver", "**", "chromedriver"),
+            os.path.join(home_dir, "Library", "Caches", "selenium", "chromedriver", "**", "chromedriver"),
+        ]
+
+    discovered = []
+    for pattern in posix_patterns:
+        try:
+            discovered.extend(glob.glob(pattern, recursive=True))
+        except Exception:
+            pass
+
+    discovered = [p for p in discovered if _ensure_executable(p)]
+    if discovered:
+        discovered.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        auto_path = discovered[0]
+        logger.info(f"[Browser] Auto-discovered ChromeDriver path: {auto_path}")
+        return auto_path
+
     return ""
 
 
@@ -541,11 +646,11 @@ def _normalize_downloaded_chromedriver_path(raw_path: str) -> str:
     if os.path.isdir(candidate):
         exe_name = "chromedriver.exe" if os.name == "nt" else "chromedriver"
         nested = os.path.join(candidate, exe_name)
-        if os.path.isfile(nested):
+        if _ensure_executable(nested):
             return nested
         return ""
 
-    if os.path.isfile(candidate):
+    if _ensure_executable(candidate):
         base_name = os.path.basename(candidate).lower()
         if "chromedriver" in base_name:
             return candidate
@@ -554,7 +659,7 @@ def _normalize_downloaded_chromedriver_path(raw_path: str) -> str:
             os.path.dirname(candidate),
             "chromedriver.exe" if os.name == "nt" else "chromedriver",
         )
-        if os.path.isfile(sibling):
+        if _ensure_executable(sibling):
             return sibling
 
     return ""

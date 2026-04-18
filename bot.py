@@ -859,7 +859,7 @@ def run_bot(stop_event=None, account_owner=None, continuous_mode: bool = False):
                             "⚠️ Browser bootstrap failed. Auto ChromeDriver download may be blocked on this VPS."
                         )
                         log_and_telegram(
-                            "💡 Tip: install a matching chromedriver.exe and set CHROMEDRIVER_PATH for this VPS."
+                            "💡 Tip: install a matching ChromeDriver binary and set CHROMEDRIVER_PATH for this host."
                         )
                     continue
 
