@@ -42,6 +42,8 @@ class TelegramBot:
             "accounts_used": 0,
             "models_processed": 0,
             "dms_sent": 0,
+            "likes_sent": 0,
+            "comments_sent": 0,
             "dms_failed": 0,
             "current_account": "—",
             "current_model": "—",

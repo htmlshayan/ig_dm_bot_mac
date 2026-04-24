@@ -2068,16 +2068,35 @@ def _process_comment_liking_model(
                 if already_liked:
                     logger.debug(f"[{username}] Post {processed}/{target} already liked, skipping")
                 else:
-                    # Like the post
-                    liked_now = _like_home_feed_post(driver, interaction_scope)
-                    if liked_now:
-                        liked_posts += 1
-                        log_and_telegram(f"[{username}] ❤️ Liked feed post ({liked_posts}/{target})")
-                        if _sleep_after_comment_like_action(stop_event=stop_event):
-                            break
+                    # Randomize actions for more human-like behavior
+                    # 80% chance to like, 40% chance to comment
+                    do_like = random.random() < 0.8
+                    do_comment = random.random() < 0.4
+                    
+                    if not do_like and not do_comment:
+                        # Just "read" it for a moment
+                        human_delay(2.0, 5.0)
 
-                    # Comment on the post
-                    if comment_pool:
+                    # 1. Like the post
+                    if do_like:
+                        liked_now = _like_home_feed_post(driver, interaction_scope)
+                        if liked_now:
+                            liked_posts += 1
+                            telegram_bot.stats["likes_sent"] += 1
+                            # Attempt to log to DB
+                            try:
+                                owner = _extract_post_owner_username(post_element) or "feed_post"
+                                database.log_engagement(username, owner, 'like')
+                            except Exception:
+                                pass
+                            log_and_telegram(f"[{username}] ❤️ Liked feed post ({liked_posts}/{target})")
+                            if _sleep_after_comment_like_action(stop_event=stop_event):
+                                break
+                        else:
+                            human_delay(0.5, 1.0)
+
+                    # 2. Comment on the post
+                    if do_comment and comment_pool:
                         comment_text = random.choice(comment_pool)
                         commented_now = _comment_on_home_feed_post(
                             driver,
@@ -2087,11 +2106,20 @@ def _process_comment_liking_model(
                         )
                         if commented_now:
                             commented_posts += 1
+                            telegram_bot.stats["comments_sent"] += 1
+                            # Attempt to log to DB
+                            try:
+                                owner = _extract_post_owner_username(post_element) or "feed_post"
+                                database.log_engagement(username, owner, 'comment')
+                            except Exception:
+                                pass
                             log_and_telegram(
                                 f"[{username}] 💬 Commented on feed post ({commented_posts}/{target})"
                             )
                             if _sleep_after_comment_like_action(stop_event=stop_event):
                                 break
+                        else:
+                            human_delay(0.5, 1.0)
 
             except Exception as post_error:
                 logger.debug(f"[{username}] Feed interaction failed: {post_error}")
@@ -2363,8 +2391,10 @@ def _process_target_engagement(
             if success:
                 engaged_count += 1
                 already_engaged.add(target_user)
+                telegram_bot.stats["likes_sent"] += 1
                 # Log to DB to prevent repeat engagement (reuse DM log for simplicity or add new)
                 database.log_dm(target_user) 
+                database.log_engagement(username, target_user, 'like')
                 log_and_telegram(f"[{username}] ❤️ Liked latest post for @{target_user} ({engaged_count}/{max_users})")
             
             human_delay(5, 10)
@@ -2521,6 +2551,16 @@ def _extract_home_feed_post_url(post_element) -> str:
     return ""
 
 
+def _extract_post_owner_username(post_element) -> str:
+    """Extract post owner username from a home feed article."""
+    try:
+        # Look for username link in header
+        owner_link = post_element.find_element(By.XPATH, ".//header//a[contains(@class, 'x1i10hfl')]")
+        return str(owner_link.text or "").strip().lstrip("@")
+    except Exception:
+        return ""
+
+
 def _do_human_like_break(driver, username, stop_event=None):
     """
     Perform a human-like break: Home feed interactions + Explore browsing.
@@ -2533,8 +2573,22 @@ def _do_human_like_break(driver, username, stop_event=None):
         human_delay(3, 5)
         _dismiss_home_feed_dialogs(driver)
         
-        # Like/Comment 1-2 random posts
-        break_target = random.randint(1, 2)
+        # Phase A: Idle scrolling (simulate reading/consuming content)
+        log_and_telegram(f"[{username}] 🏠 Reading home feed...")
+        for _ in range(random.randint(3, 6)):
+            if stop_event and stop_event.is_set():
+                break
+            _scroll_home_feed(driver)
+            human_delay(3, 8)
+            
+        if stop_event and stop_event.is_set():
+            return
+
+        # Phase B: Interactions (Liking/Commenting)
+        # Use a mini-session of 2-4 posts with randomized actions
+        break_target = random.randint(2, 4)
+        log_and_telegram(f"[{username}] ❤️ Engaging with {break_target} home feed posts...")
+        
         _process_comment_liking_model(
             driver, 
             {"username": username}, 
@@ -2555,14 +2609,14 @@ def _do_human_like_break(driver, username, stop_event=None):
         driver.get(f"{INSTAGRAM_BASE_URL}/explore/")
         human_delay(4, 7)
         
-        # Scroll Explore for 10-20 seconds
+        # Scroll Explore for 30-60 seconds
         scroll_start = time.time()
-        scroll_duration = random.randint(10, 20)
+        scroll_duration = random.randint(30, 60)
         while time.time() - scroll_start < scroll_duration:
             if stop_event and stop_event.is_set():
                 break
             _scroll_home_feed(driver)
-            human_delay(1.5, 3.5)
+            human_delay(3, 6)
             
         if stop_event and stop_event.is_set():
             return
@@ -2576,7 +2630,7 @@ def _do_human_like_break(driver, username, stop_event=None):
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_reel)
                 human_delay(1, 2)
                 _safe_click(driver, target_reel)
-                human_delay(5, 10) # "Watch" for a bit
+                human_delay(15, 30) # "Watch" for a bit
                 
                 # Close it
                 _close_post_view_and_return_feed(driver)

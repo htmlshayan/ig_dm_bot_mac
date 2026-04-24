@@ -445,10 +445,24 @@ def init_db():
             )
         """)
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_dm_event_log_timestamp ON dm_event_log(timestamp DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_dm_event_log_sender ON dm_event_log(sender_account)"
+        )
+        
+        # Engagement Log Table
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS engagement_log (
+                id {id_primary},
+                sender_account TEXT NOT NULL,
+                target_username TEXT NOT NULL,
+                engagement_type TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_engagement_log_timestamp ON engagement_log(timestamp DESC)"
         )
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_dm_event_log_sender ON dm_event_log(sender_account, timestamp DESC)"
+            "CREATE INDEX IF NOT EXISTS idx_dm_event_log_sender_ts ON dm_event_log(sender_account, timestamp DESC)"
         )
 
         # Dashboard Users Table
@@ -1284,6 +1298,34 @@ def log_dm_event(sender_account: str, target_username: str, model_username: str 
                 clean_target,
                 clean_model,
                 clean_status,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def log_engagement(sender_account: str, target_username: str, engagement_type: str):
+    """Log a like or comment event for dashboard reporting."""
+    clean_sender = str(sender_account or "").strip()
+    clean_target = str(target_username or "").strip()
+    clean_type = str(engagement_type or "").strip().lower()
+
+    if not clean_sender or not clean_target:
+        return
+
+    conn = _get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO engagement_log (sender_account, target_username, engagement_type, timestamp)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                clean_sender,
+                clean_target,
+                clean_type,
                 datetime.now().isoformat(timespec="seconds"),
             ),
         )

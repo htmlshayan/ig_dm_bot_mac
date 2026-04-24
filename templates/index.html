@@ -1115,6 +1115,14 @@
           <div class="val" id="todayDms">--</div>
         </div>
         <div class="stat-card">
+          <h3>Likes Today</h3>
+          <div class="val" id="todayLikes">--</div>
+        </div>
+        <div class="stat-card">
+          <h3>Comments Today</h3>
+          <div class="val" id="todayComments">--</div>
+        </div>
+        <div class="stat-card">
           <h3>Last DM Sent Time</h3>
           <div class="val" id="lastDmSentAt" style="font-size: 1.1rem; line-height: 1.4;">--</div>
         </div>
@@ -4368,6 +4376,8 @@ Great shot!" style="font-family: inherit; width: 100%;"></textarea>
         // Update Stats
         document.getElementById('lifetimeDms').innerText = state.total_dms_all_time || 0;
         document.getElementById('todayDms').innerText = state.dms_sent_today || 0;
+        document.getElementById('todayLikes').innerText = state.likes_sent_today || 0;
+        document.getElementById('todayComments').innerText = state.comments_sent_today || 0;
         document.getElementById('lastDmSentAt').innerText = formatDashboardTimestamp(state.last_dm_sent_at);
         
         // Badge
