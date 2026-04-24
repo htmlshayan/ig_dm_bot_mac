@@ -189,6 +189,17 @@ class TelegramBot:
             "Use `/stop` to request stop"
         )
 
+    def send_engagement_startup(self):
+        """Send Like-Comment bot startup notification."""
+        self.start_time = time.time()
+        self.send(
+            "🚀 *LIKE-COMMENT BOT STARTED*\n\n"
+            f"⏰ Time: {datetime.now().strftime('%H:%M:%S')}\n"
+            "Randomizing: Home Feed + Target Models\n"
+            "Use `/status` for current state\n"
+            "Use `/stop` to request stop"
+        )
+
     def send_account_pool_summary(self, summary_text: str):
         """Send an IG account availability summary grouped by model label."""
         clean_summary = str(summary_text or "").strip()
@@ -397,6 +408,15 @@ class TelegramBot:
             f"🎯 Models: {models_done}\n"
             f"⏰ Started : {self._started_ago()}"
             f"{account_section}"
+        )
+
+    def send_engagement_complete(self, total_interactions: int, accounts_done: int):
+        """Notify that the entire like-comment session is done."""
+        self.send(
+            f"🏁 *LIKE-COMMENT SESSION COMPLETE*\n\n"
+            f"❤️ Total Interactions: {total_interactions}\n"
+            f"👤 Accounts Processed: {accounts_done}\n"
+            f"⏰ Started : {self._started_ago()}"
         )
 
     def send_24h_dm_summary(self, summary: dict):

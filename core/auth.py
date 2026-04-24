@@ -64,6 +64,24 @@ def type_like_human(element, text):
         time.sleep(random.uniform(typing_min, typing_max))
 
 
+def human_scroll(driver, distance):
+    """Scroll in small, variable increments to simulate human scrolling."""
+    current_scroll = 0
+    while current_scroll < distance:
+        # Random step size
+        step = random.randint(150, 400)
+        # Random duration for this step
+        duration = random.uniform(0.1, 0.4)
+        
+        driver.execute_script(f"window.scrollBy(0, {step});")
+        current_scroll += step
+        time.sleep(duration)
+        
+        # Occasional "pause to read"
+        if random.random() < 0.15:
+            time.sleep(random.uniform(1.0, 3.0))
+
+
 def detect_challenge(driver) -> ChallengeType:
     """
     Detect if Instagram is showing a challenge/verification screen.

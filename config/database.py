@@ -107,6 +107,23 @@ DEFAULT_DB_SETTINGS = {
     "POST_AGE_PRIORITY_HOURS": 24,
     "MAX_POSTS_TO_CHECK": 6,
     "MAX_LIKERS_PER_POST": 30,
+    "TARGET_ENGAGEMENT_MAX_USERS_PER_MODEL": 20,
+    "TARGET_ENGAGEMENT_MAX_POST_AGE_HOURS": 4,
+    "COMMENT_LIKING_ENABLED": False,
+    "COMMENT_LIKING_MAX_POSTS_PER_PASS": 50,
+    "COMMENT_LIKING_MIN_LIKES_PER_PASS": 50,
+    "COMMENT_LIKING_MAX_LIKES_PER_PASS": 50,
+    "COMMENT_LIKING_MIN_COMMENTS_PER_PASS": 50,
+    "COMMENT_LIKING_MAX_COMMENTS_PER_PASS": 50,
+    "COMMENT_LIKING_COMMENT_CHANCE_PCT": 100,
+    "COMMENT_LIKING_COMMENT_POOL": [
+        "Nice post!",
+        "Love this!",
+        "Great shot!",
+        "Amazing vibe!",
+        "So good!",
+        "This looks awesome!",
+    ],
     "MAX_FOLLOWERS_TO_SCRAPE": 50,
     "CHALLENGE_WAIT_TIMEOUT": 300,
     "CHALLENGE_POLL_INTERVAL": 5,
@@ -377,6 +394,14 @@ def init_db():
                 text TEXT UNIQUE NOT NULL
             )
         """)
+
+        # Comment Pool Table
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS comments (
+                id {id_primary},
+                text TEXT UNIQUE NOT NULL
+            )
+        """)
         
         # Settings Table
         conn.execute("""
@@ -545,9 +570,30 @@ def init_db():
         _ensure_account_suspended_column(conn)
         _ensure_master_user(conn)
 
+        # Force-update comment-liking targets to 50 per pass
+        _force_update_comment_liking_targets(conn)
+
         conn.commit()
     finally:
         conn.close()
+
+
+def _force_update_comment_liking_targets(conn):
+    """One-time migration: raise comment-liking targets to 50 per pass."""
+    updates = {
+        "COMMENT_LIKING_MAX_POSTS_PER_PASS": 50,
+        "COMMENT_LIKING_MIN_LIKES_PER_PASS": 50,
+        "COMMENT_LIKING_MAX_LIKES_PER_PASS": 50,
+        "COMMENT_LIKING_MIN_COMMENTS_PER_PASS": 50,
+        "COMMENT_LIKING_MAX_COMMENTS_PER_PASS": 50,
+        "COMMENT_LIKING_COMMENT_CHANCE_PCT": 100,
+    }
+    for key, new_value in updates.items():
+        conn.execute(
+            "UPDATE settings SET value_json = ? WHERE key = ?",
+            (json.dumps(new_value), key),
+        )
+
 
 # ── Auth/User CRUD ──
 def authenticate_user(username: str, password: str):
@@ -1084,6 +1130,31 @@ def save_messages(messages_list):
             conn.execute(
                 "INSERT INTO messages (text) VALUES (?) ON CONFLICT(text) DO NOTHING",
                 (clean_msg,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+# ── Comments CRUD ──
+def get_comments():
+    conn = _get_connection()
+    try:
+        rows = conn.execute("SELECT text FROM comments").fetchall()
+        return [str(r["text"] or "").strip() for r in rows if str(r["text"] or "").strip()]
+    finally:
+        conn.close()
+
+def save_comments(comments_list):
+    conn = _get_connection()
+    try:
+        conn.execute("DELETE FROM comments")
+        for comment in comments_list:
+            clean_comment = str(comment or "").strip()
+            if not clean_comment:
+                continue
+            conn.execute(
+                "INSERT INTO comments (text) VALUES (?) ON CONFLICT(text) DO NOTHING",
+                (clean_comment,),
             )
         conn.commit()
     finally:

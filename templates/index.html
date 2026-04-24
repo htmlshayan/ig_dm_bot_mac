@@ -1118,24 +1118,22 @@
           <h3>Last DM Sent Time</h3>
           <div class="val" id="lastDmSentAt" style="font-size: 1.1rem; line-height: 1.4;">--</div>
         </div>
-        <div class="stat-card">
-          <h3>Run Mode</h3>
-          <div class="val" id="currentSession">--</div>
-        </div>
-        <div class="stat-card">
-          <h3>Runtime Policy</h3>
-          <div class="val" id="cooldownVal" style="font-size: 1.5rem; color: var(--text-muted)">--</div>
-        </div>
       </div>
       
       <div class="card" style="display: flex; gap: 1rem;">
-        <button id="btnStart" class="btn btn-success" onclick="botCommand('start')" style="flex: 1; justify-content:center"><i class="fas fa-play"></i> START BOT</button>
-        <button id="btnStop" class="btn btn-danger" onclick="botCommand('stop')" style="flex: 1; justify-content:center"><i class="fas fa-stop"></i> STOP BOT</button>
+        <button id="btnStart" class="btn btn-success" onclick="botCommand('start')" style="flex: 1; justify-content:center"><i class="fas fa-play"></i> START DM BOT</button>
+        <button id="btnStop" class="btn btn-danger" onclick="botCommand('stop')" style="flex: 1; justify-content:center; display:none"><i class="fas fa-stop"></i> STOP DM BOT</button>
       </div>
 
       <div class="card" style="display:flex;">
         <button id="btnStartChatRuntime" class="btn btn-success" onclick="startChatScraperAndReplier()" style="width:100%; justify-content:center">
           <i class="fas fa-play"></i> START CHAT SCRAPER + REPLY BOT
+        </button>
+      </div>
+
+      <div class="card" style="display:flex; flex-direction:column; gap:0.7rem;">
+        <button id="btnToggleEngagement" class="btn btn-success" onclick="toggleTargetEngagementRuntime()" style="width:100%; justify-content:center">
+          <i class="fas fa-play"></i> START LIKE-COMMENT BOT
         </button>
       </div>
       
@@ -1285,6 +1283,22 @@
     <!-- TARGETS -->
     <div id="tab-targets" class="tab-content">
       <h1>Targets & Messages</h1>
+
+      <div style="margin-bottom: 1.5rem;">
+        <!-- General Comment Pool -->
+        <div class="card">
+          <div class="section-head" style="margin-bottom: 1rem;">
+            <div>
+              <h3 style="margin-bottom: 0.4rem;"><i class="fas fa-comments"></i> General Comment Pool</h3>
+              <p style="font-size: 0.85rem; color: var(--text-muted);">Generic comments used by the Comment-Liking bot for feed posts.</p>
+            </div>
+            <button class="btn btn-success btn-sm" onclick="saveComments()"><i class="fas fa-save"></i> Save Comment Pool</button>
+          </div>
+          <textarea id="commentsTextarea" rows="8" placeholder="Nice post!
+Love this!
+Great shot!" style="font-family: inherit; width: 100%;"></textarea>
+        </div>
+      </div>
 
       <div class="card">
         <div class="section-head" style="margin-bottom: 1rem;">
@@ -1508,9 +1522,6 @@
         <select id="inboxScrapeAccountSelect" style="display:none;" disabled>
           <option value="__all__">All accounts in selected label</option>
         </select>
-        <button class="btn btn-primary btn-sm" id="inboxScrapeBtn" onclick="startInboxScrape()">
-          <i class="fas fa-sync-alt"></i> Scrape Inbox Now
-        </button>
         <button class="btn btn-danger btn-sm" id="inboxDeleteAllBtn" onclick="deleteAllInboxThreads()">
           <i class="fas fa-trash-alt"></i> Delete All Chats
         </button>
@@ -1752,6 +1763,7 @@
     let globalAccounts = [];
     let globalModels = [];
     let globalMessages = [];
+    let globalComments = [];
     let globalModelMessages = [];
     let globalModelMessageMeta = {};
     let globalSettings = {};
@@ -1793,6 +1805,7 @@
     let inboxThreadScrollPositions = {};
     let globalInboxScraperEnabled = false;
     let globalInboxReplierEnabled = false;
+    let globalEngagementEnabled = false;
     let pendingChatRuntimeAction = '';
     let activeInboxReplyJobId = '';
     let pendingInboxScraperControl = '';
@@ -2979,15 +2992,17 @@
         }
         renderModelsDatalist();
         
-        // Populate Messages
-        globalMessages = data.messages || [];
-        const messagesTextarea = document.getElementById('messagesTextarea');
-        if (messagesTextarea) {
-          messagesTextarea.value = globalMessages.join('\n');
+        // Populate Comments
+        globalComments = data.comments || [];
+        const commentsTextarea = document.getElementById('commentsTextarea');
+        if (commentsTextarea) {
+          commentsTextarea.value = globalComments.join('\n');
         }
         
         // Populate Settings
         globalSettings = data.settings || {};
+        globalEngagementEnabled = normalizeBooleanFlag(globalSettings.ENGAGEMENT_ENABLED, false);
+        globalSettings.ENGAGEMENT_ENABLED = globalEngagementEnabled;
         globalModelMessages = [];
         globalModelMessageMeta = {};
 
@@ -3057,6 +3072,7 @@
           }
         }
 
+        refreshInboxVisibilityAfterAccountChange();
         renderModelMessages();
       } catch(e) {
         console.error("Failed to load config", e);
@@ -3980,20 +3996,20 @@
       }
     }
     
-    async function saveMessages() {
-      const messagesTextarea = document.getElementById('messagesTextarea');
-      const text = messagesTextarea ? messagesTextarea.value : globalMessages.join('\n');
+    async function saveComments() {
+      const commentsTextarea = document.getElementById('commentsTextarea');
+      const text = commentsTextarea ? commentsTextarea.value : globalComments.join('\n');
       const list = text.split('\n').map(x => x.trim()).filter(x => x);
       try {
-        await apiJson('/api/config/messages', {
+        await apiJson('/api/config/comments', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify(list)
         });
-        globalMessages = list;
-        showToast("Message Templates Saved successfully!");
+        globalComments = list;
+        showToast("Comment pool saved successfully!");
       } catch (e) {
-        showError(e.message || 'Failed to save messages');
+        showError(e.message || 'Failed to save comments');
       }
     }
 
@@ -4328,10 +4344,10 @@
 
       btnStart.innerHTML = startLoading
         ? '<i class="fas fa-spinner fa-spin"></i> STARTING...'
-        : '<i class="fas fa-play"></i> START BOT';
+        : '<i class="fas fa-play"></i> START DM BOT';
       btnStop.innerHTML = stopLoading
         ? '<i class="fas fa-spinner fa-spin"></i> STOPPING...'
-        : '<i class="fas fa-stop"></i> STOP BOT';
+        : '<i class="fas fa-stop"></i> STOP DM BOT';
     }
 
     function formatDashboardTimestamp(rawValue) {
@@ -4345,13 +4361,14 @@
         const state = await res.json();
         lastKnownBotStatus = String(state.status || 'idle').toLowerCase();
         const status = lastKnownBotStatus;
+        globalEngagementEnabled = normalizeBooleanFlag(state.engagement_running, false);
+        globalSettings.ENGAGEMENT_ENABLED = globalEngagementEnabled;
+        updateEngagementButton(globalEngagementEnabled);
         
         // Update Stats
         document.getElementById('lifetimeDms').innerText = state.total_dms_all_time || 0;
         document.getElementById('todayDms').innerText = state.dms_sent_today || 0;
         document.getElementById('lastDmSentAt').innerText = formatDashboardTimestamp(state.last_dm_sent_at);
-        document.getElementById('currentSession').innerText = status === 'running' ? '24/7 LIVE' : (status === 'stopping' ? 'Stopping...' : 'Manual');
-        document.getElementById('cooldownVal').innerText = 'No cooldown';
         
         // Badge
         const badge = document.getElementById('statusBadge');
@@ -4397,7 +4414,11 @@
       try {
         const res = await fetch('/' + normalizedCmd, { cache: 'no-store' });
         if (!res.ok) {
-          throw new Error(`Request failed (${res.status})`);
+          let errText = '';
+          try {
+            errText = String(await res.text() || '').trim();
+          } catch (readErr) {}
+          throw new Error(errText || `Request failed (${res.status})`);
         }
       } catch (e) {
         pendingBotCommand = '';
@@ -4589,6 +4610,76 @@
 
     // Init
     // ── Inbox Functions ──
+    function isInboxAccountSuspended(igAccount) {
+      const cleanAccount = String(igAccount || '').trim().toLowerCase();
+      if (!cleanAccount) {
+        return false;
+      }
+
+      const accountRow = (globalAccounts || []).find(acc =>
+        String((acc && acc.username) || '').trim().toLowerCase() === cleanAccount
+      ) || null;
+
+      if (!accountRow) {
+        return false;
+      }
+
+      return normalizeBooleanFlag(accountRow.is_suspended, false);
+    }
+
+    function isInboxAccountVisible(igAccount) {
+      return !isInboxAccountSuspended(igAccount);
+    }
+
+    function filterInboxThreadsBySuspendedAccounts(threads) {
+      return (Array.isArray(threads) ? threads : []).filter(thread => {
+        const account = String((thread && thread.ig_account) || '').trim().toLowerCase();
+        return isInboxAccountVisible(account);
+      });
+    }
+
+    function refreshInboxVisibilityAfterAccountChange() {
+      populateInboxAccountSelect();
+
+      globalInboxThreads = filterInboxThreadsBySuspendedAccounts(globalInboxThreads);
+      renderInboxThreads(globalInboxThreads);
+
+      const unreadCount = globalInboxThreads.filter(thread => !!(thread && thread.is_unread)).length;
+      updateInboxNavBadge(unreadCount);
+
+      const summaryRow = document.getElementById('inboxSummaryRow');
+      if (summaryRow) {
+        summaryRow.style.display = globalInboxThreads.length ? 'flex' : 'none';
+      }
+
+      const countEl = document.getElementById('inboxUnreadCount');
+      if (countEl) countEl.textContent = String(unreadCount);
+
+      const totalEl = document.getElementById('inboxTotalThreads');
+      if (totalEl) totalEl.textContent = String(globalInboxThreads.length);
+
+      const lastScrapedEl = document.getElementById('inboxLastScraped');
+      if (lastScrapedEl) {
+        const latest = globalInboxThreads[0] || null;
+        lastScrapedEl.textContent = latest && latest.scraped_at ? formatInboxTime(latest.scraped_at) : 'Never';
+      }
+
+      if (activeInboxThreadId) {
+        const exists = globalInboxThreads.some(t => Number((t && t.id) || 0) === Number(activeInboxThreadId || 0));
+        if (!exists) {
+          activeInboxThreadId = 0;
+          globalInboxMessages = [];
+          renderInboxMessages([]);
+          setInboxActiveThreadHeader(null);
+          setInboxComposerState(false);
+          stopInboxReplyStatusPolling({ clearPending: true });
+          resetInboxComposer();
+        }
+      }
+
+      updateInboxThreadPaneHintText();
+    }
+
     function populateInboxAccountSelect() {
       const select = document.getElementById('inboxAccountSelect');
       if (!select) return;
@@ -4599,7 +4690,7 @@
       const labelsByKey = {};
       for (const acc of (globalAccounts || [])) {
         const username = String(acc.username || '').trim().toLowerCase();
-        if (!username) continue;
+        if (!username || normalizeBooleanFlag(acc && acc.is_suspended, false)) continue;
 
         const labelMeta = normalizeAccountLabelGroup(String(acc.model_label || '').trim() || 'generic');
         const labelKey = String(labelMeta.key || 'generic').trim().toLowerCase() || 'generic';
@@ -4780,6 +4871,57 @@
       btn.classList.add('btn-success');
       btn.disabled = false;
       btn.innerHTML = '<i class="fas fa-play"></i> START CHAT SCRAPER + REPLY BOT';
+    }
+
+
+    async function toggleTargetEngagementRuntime() {
+      const btn = document.getElementById('btnToggleEngagement');
+      if (!btn) return;
+      const isRunning = btn.classList.contains('btn-danger');
+      const action = isRunning ? 'stop' : 'start';
+      const actionLabel = isRunning ? 'STOPPING' : 'STARTING';
+      
+      btn.disabled = true;
+      btn.innerHTML = `<span class="inbox-spinner"></span> ${actionLabel} LIKE-COMMENT...`;
+      
+      try {
+        const data = await apiJson(`/api/bot/engagement/control`, { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action })
+        });
+        if (data.success) {
+          const enabled = data.engagement_enabled === true;
+          updateEngagementButton(enabled);
+          if (enabled) {
+            showToast(data.message || 'Like-Comment bot started.');
+          } else {
+            showToast(data.message || 'Like-Comment bot stopping...');
+          }
+        } else {
+          showError(data.error || `Failed to ${action} engagement`);
+          updateEngagementButton(isRunning);
+        }
+      } catch (e) {
+        showError(e.message || (isRunning ? 'Failed to stop like-comment' : 'Failed to start like-comment'));
+        updateEngagementButton(isRunning);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function updateEngagementButton(running) {
+      const btn = document.getElementById('btnToggleEngagement');
+      if (!btn) return;
+      if (running) {
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-danger');
+        btn.innerHTML = '<i class="fas fa-stop"></i> STOP LIKE-COMMENT BOT';
+      } else {
+        btn.classList.remove('btn-danger');
+        btn.classList.add('btn-success');
+        btn.innerHTML = '<i class="fas fa-play"></i> START LIKE-COMMENT BOT';
+      }
     }
 
     async function startChatScraperAndReplier() {
@@ -4972,7 +5114,7 @@
 
       for (const acc of (globalAccounts || [])) {
         const username = String(acc.username || '').trim().toLowerCase();
-        if (!username || seen.has(username)) continue;
+        if (!username || seen.has(username) || normalizeBooleanFlag(acc && acc.is_suspended, false)) continue;
 
         const labelMeta = normalizeAccountLabelGroup(String(acc.model_label || '').trim() || 'generic');
         const accountLabelKey = String(labelMeta.key || 'generic').trim().toLowerCase() || 'generic';
@@ -5673,6 +5815,18 @@
         return;
       }
 
+      const localThread = (globalInboxThreads || []).find(t => Number((t && t.id) || 0) === numericId) || null;
+      if (!localThread) {
+        activeInboxThreadId = 0;
+        globalInboxMessages = [];
+        renderInboxMessages([]);
+        setInboxActiveThreadHeader(null);
+        setInboxComposerState(false);
+        stopInboxReplyStatusPolling({ clearPending: true });
+        resetInboxComposer();
+        return;
+      }
+
       const shouldRefreshAutomation = !!(options && options.refreshAutomation);
       const shouldPreservePosition = !!(options && options.preservePosition);
       const shouldScrollToBottom = !!(options && options.scrollToBottom);
@@ -6177,12 +6331,13 @@
         params.set('unread_only', 'false');
 
         const data = await apiJson(`/api/inbox/threads?${params.toString()}`);
-        globalInboxThreads = Array.isArray(data.threads) ? data.threads : [];
+        const allThreads = Array.isArray(data.threads) ? data.threads : [];
+        globalInboxThreads = filterInboxThreadsBySuspendedAccounts(allThreads);
         applyPendingInboxThreadState();
         renderInboxThreads(globalInboxThreads);
 
         const unreadCount = globalInboxThreads.filter(thread => !!(thread && thread.is_unread)).length;
-        const globalUnreadCount = Number(data.unread_count || unreadCount || 0);
+        const globalUnreadCount = unreadCount;
         updateInboxNavBadge(globalUnreadCount);
 
         const summaryRow = document.getElementById('inboxSummaryRow');
@@ -6222,6 +6377,7 @@
     }
 
     async function initApp() {
+      renderBotControlButtons(lastKnownBotStatus);
       await loadConfig();
       populateInboxAccountSelect();
       onInboxScrapeLabelChange();

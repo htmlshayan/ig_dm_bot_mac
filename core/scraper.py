@@ -16,7 +16,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from config.settings import (
     INSTAGRAM_BASE_URL,
 )
-from config.database import get_required_setting
+from config.database import get_required_setting, get_setting
 from core.auth import human_delay
 
 logger = logging.getLogger("model_dm_bot")
@@ -28,6 +28,23 @@ def _setting_int(key: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise ValueError(f"Invalid integer setting '{key}': {value}")
+
+
+def _setting_bool(key: str, default: bool = False) -> bool:
+    value = get_setting(key, default)
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(default)
+    if isinstance(value, (int, float)):
+        return int(value) != 0
+
+    text = str(value).strip().lower()
+    if text in ("1", "true", "on", "yes", "enable", "enabled"):
+        return True
+    if text in ("0", "false", "off", "no", "disable", "disabled", "", "none", "null"):
+        return False
+    return bool(default)
 
 
 def get_recent_posts(driver, model_username: str) -> list:
@@ -240,13 +257,16 @@ def get_post_interactors(driver, post_url: str, already_dmd: set, model_username
 
     commenter_count = len(usernames)
 
-    # 4. Scrape likers by clicking "likes" count
-    try:
-        max_likers = _setting_int("MAX_LIKERS_PER_POST")
-        likers = _scrape_likers(driver, already_dmd, max_likers)
-        usernames.update(likers)
-    except Exception as e:
-        logger.debug(f"[Scraper] Error scraping likers: {e}")
+    # 4. Optionally scrape likers by clicking "likes" count.
+    if _setting_bool("COMMENT_LIKING_ENABLED", default=False):
+        try:
+            max_likers = _setting_int("MAX_LIKERS_PER_POST")
+            likers = _scrape_likers(driver, already_dmd, max_likers)
+            usernames.update(likers)
+        except Exception as e:
+            logger.debug(f"[Scraper] Error scraping likers: {e}")
+    else:
+        logger.info("[Scraper] Comment liking is OFF, skipping liker collection for this post")
 
     # Remove the model's own username if present
     usernames.discard(model_username)
@@ -385,3 +405,74 @@ def _extract_username_from_href(href: str) -> str:
     if "?" in username:
         username = username.split("?")[0]
     return username
+def get_recent_commenters(driver, post_url: str, max_age_hours: float, model_username: str) -> list:
+    """
+    Open a post and scrape commenters who posted within the last max_age_hours.
+    """
+    logger.info(f"[Scraper] Scraping recent commenters (< {max_age_hours}h) from: {post_url}")
+    driver.get(post_url)
+    human_delay(3, 5)
+
+    usernames = set()
+    
+    # 1. Load some comments
+    for _ in range(3): # Load a few batches
+        try:
+            load_more_btn = driver.find_element(
+                By.XPATH,
+                "//button[contains(@class, '_abl-')] | "
+                "//button[.//*[contains(@aria-label, 'Load more')]] | "
+                "//svg[@aria-label='Load more comments']/ancestor::button"
+            )
+            driver.execute_script("arguments[0].click();", load_more_btn)
+            human_delay(1.5, 2.5)
+        except Exception:
+            break
+
+    # 2. Extract commenters with their timestamps
+    try:
+        # Find all comment blocks. 
+        # Usually they are inside a list or a div with a specific class.
+        # A common pattern is a container with an <a> (username) and a <time> (age)
+        comment_blocks = driver.find_elements(By.XPATH, "//ul[contains(@class, 'x78zum5')]//li | //div[@role='button' and .//time]")
+        
+        for block in comment_blocks:
+            try:
+                # Find the username link
+                user_elem = block.find_element(By.XPATH, ".//a[contains(@href, '/') and @role='link']")
+                username = _extract_username_from_href(user_elem.get_attribute("href"))
+                if not username or username == model_username:
+                    continue
+
+                # Find the time element
+                time_elem = block.find_element(By.XPATH, ".//time")
+                datetime_str = time_elem.get_attribute("datetime")
+                
+                age_hours = 999.0
+                if datetime_str:
+                    post_time = datetime.fromisoformat(datetime_str.replace("Z", "+00:00"))
+                    now = datetime.now(timezone.utc)
+                    age_hours = (now - post_time).total_seconds() / 3600
+                else:
+                    # Fallback to text: "2h", "4h", "1d"
+                    time_text = time_elem.text.strip().lower()
+                    if 'm' in time_text: # minutes
+                        age_hours = int(re.search(r'\d+', time_text).group()) / 60
+                    elif 'h' in time_text: # hours
+                        age_hours = float(re.search(r'\d+', time_text).group())
+                    elif 'd' in time_text: # days
+                        age_hours = float(re.search(r'\d+', time_text).group()) * 24
+                    elif 'w' in time_text: # weeks
+                        age_hours = float(re.search(r'\d+', time_text).group()) * 24 * 7
+
+                if age_hours <= max_age_hours:
+                    usernames.add(username)
+            except Exception:
+                continue
+                
+    except Exception as e:
+        logger.error(f"[Scraper] Error scraping recent commenters: {e}")
+
+    final_list = list(usernames)
+    logger.info(f"[Scraper] Found {len(final_list)} recent commenters (< {max_age_hours}h)")
+    return final_list

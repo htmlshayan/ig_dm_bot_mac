@@ -17,7 +17,7 @@ from config.settings import (
     INSTAGRAM_BASE_URL,
 )
 from config.database import get_required_setting, get_setting
-from core.auth import human_delay
+from core.auth import human_delay, type_like_human
 
 logger = logging.getLogger("model_dm_bot")
 EMOJI_SUFFIX_ENABLED_KEY = "DM_RANDOM_EMOJI_SUFFIX_ENABLED"
@@ -147,7 +147,7 @@ def send_dm(driver, username: str, message: str) -> str:
             driver.execute_script("arguments[0].value = ''; arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", query_box)
             query_box.clear()
             human_delay(0.5, 1)
-            query_box.send_keys(username)
+            type_like_human(query_box, username)
             human_delay(3, 5)
         except TimeoutException:
             logger.error(f"[DM] Could not find recipient search box for @{username}")
@@ -216,7 +216,7 @@ def send_dm(driver, username: str, message: str) -> str:
             logger.info(f"[DM] Message safely injected for @{username}")
         except Exception as e:
             logger.warning(f"[DM] Error injecting message: {e}. Falling back to typing.")
-            text_area.send_keys(final_message)
+            type_like_human(text_area, final_message)
             human_delay(1, 2)
 
         # Step 6: Submit using Enter key (more reliable than UI Send button in long runs)

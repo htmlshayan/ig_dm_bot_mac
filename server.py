@@ -36,6 +36,7 @@ INBOX_PREFETCH_THREAD_LIMIT = 0
 INBOX_PREFETCH_MESSAGES_LIMIT = 0
 INBOX_SCRAPER_ENABLED_SETTING_KEY = "INBOX_SCRAPER_ENABLED"
 INBOX_REPLIER_ENABLED_SETTING_KEY = "INBOX_REPLIER_ENABLED"
+COMMENT_LIKING_ENABLED_SETTING_KEY = "COMMENT_LIKING_ENABLED"
 
 app = Flask(__name__)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
@@ -66,10 +67,54 @@ bot_state = {
 bot_thread = None
 bot_thread_lock = threading.Lock()
 stop_event = threading.Event()
+engagement_state = {
+  "status": "idle",          # idle | running | stopping | stopped
+  "current_session": 0,
+  "total_sessions": 0,
+  "last_run_start": None,
+  "last_run_end": None,
+  "next_run": None,
+  "started_by": "",
+  "started_by_role": "employee",
+  "errors": [],
+}
+engagement_thread = None
+engagement_thread_lock = threading.Lock()
+engagement_stop_event = threading.Event()
 cluster_control_thread = None
 cluster_control_thread_lock = threading.Lock()
 cluster_control_stop_event = threading.Event()
 cluster_control_last_nonce = ""
+heavy_cl_state = {
+  "status": "idle",
+  "current_session": 0,
+  "total_sessions": 0,
+  "last_run_start": None,
+  "last_run_end": None,
+  "next_run": None,
+  "started_by": "",
+  "started_by_role": "employee",
+  "errors": [],
+}
+heavy_cl_thread = None
+heavy_cl_thread_lock = threading.Lock()
+heavy_cl_stop_event = threading.Event()
+
+engagement_state = {
+  "status": "idle",
+  "current_session": 0,
+  "total_sessions": 0,
+  "last_run_start": None,
+  "last_run_end": None,
+  "next_run": None,
+  "started_by": "",
+  "started_by_role": "employee",
+  "errors": [],
+}
+engagement_thread = None
+engagement_thread_lock = threading.Lock()
+engagement_stop_event = threading.Event()
+heavy_cl_stop_event = threading.Event()
 
 CLUSTER_CONTROL_SETTING_KEY = "BOT_CLUSTER_CONTROL"
 
@@ -160,6 +205,11 @@ def _is_bot_running() -> bool:
     return bool(bot_thread and bot_thread.is_alive())
 
 
+def _is_engagement_bot_running() -> bool:
+  with engagement_thread_lock:
+    return bool(engagement_thread and engagement_thread.is_alive())
+
+
 def _request_local_stop() -> bool:
   """Request this node's bot loop to stop; returns True when thread was alive."""
   stop_event.set()
@@ -175,6 +225,71 @@ def _request_local_stop() -> bool:
       bot_state["started_by_role"] = "employee"
 
   return was_running
+
+
+def _request_engagement_stop() -> bool:
+  """Request this node's engagement loop to stop; returns True when thread was alive."""
+  engagement_stop_event.set()
+  force_stop_active_sessions()
+
+  with engagement_thread_lock:
+    was_running = bool(engagement_thread and engagement_thread.is_alive())
+    if was_running:
+      engagement_state["status"] = "stopping"
+    else:
+      engagement_state["status"] = "stopped"
+      engagement_state["started_by"] = ""
+      engagement_state["started_by_role"] = "employee"
+
+  return was_running
+
+
+def _is_heavy_cl_running() -> bool:
+  with heavy_cl_thread_lock:
+    return bool(heavy_cl_thread and heavy_cl_thread.is_alive())
+
+def _is_engagement_bot_running() -> bool:
+  with engagement_thread_lock:
+    return bool(engagement_thread and engagement_thread.is_alive())
+
+
+def _request_heavy_cl_stop() -> bool:
+  """Request this node's heavy comment-liking loop to stop."""
+  heavy_cl_stop_event.set()
+  force_stop_active_sessions()
+
+  with heavy_cl_thread_lock:
+    was_running = bool(heavy_cl_thread and heavy_cl_thread.is_alive())
+    if was_running:
+      heavy_cl_state["status"] = "stopping"
+    else:
+      heavy_cl_state["status"] = "stopped"
+      heavy_cl_state["started_by"] = ""
+      heavy_cl_state["started_by_role"] = "employee"
+
+  return was_running
+
+
+def _start_heavy_cl_loop(started_by: str = "", started_by_role: str = "employee") -> bool:
+  """Start heavy comment-liking loop thread once; return False when already running."""
+  global heavy_cl_thread
+
+  with heavy_cl_thread_lock:
+    if heavy_cl_thread and heavy_cl_thread.is_alive():
+      return False
+
+    heavy_cl_stop_event.clear()
+    heavy_cl_state["started_by"] = str(started_by or "").strip().lower()
+    heavy_cl_state["started_by_role"] = _normalize_role(started_by_role, default="employee")
+    heavy_cl_state["status"] = "running"
+
+    heavy_cl_thread = threading.Thread(
+      target=heavy_comment_liking_loop,
+      name="heavy-comment-liking-loop",
+      daemon=True,
+    )
+    heavy_cl_thread.start()
+    return True
 
 
 def _cluster_control_poll_seconds() -> float:
@@ -259,6 +374,28 @@ def _start_bot_loop(started_by: str = "", started_by_role: str = "employee") -> 
     bot_thread = threading.Thread(target=bot_loop, daemon=True)
     bot_thread.start()
     bot_state["status"] = "running"
+    return True
+
+
+def _start_engagement_loop(started_by: str = "", started_by_role: str = "employee") -> bool:
+  """Start engagement loop thread once; return False when already running."""
+  global engagement_thread
+
+  with engagement_thread_lock:
+    if engagement_thread and engagement_thread.is_alive():
+      return False
+
+    engagement_stop_event.clear()
+    engagement_state["started_by"] = str(started_by or "").strip().lower()
+    engagement_state["started_by_role"] = _normalize_role(started_by_role, default="employee")
+    engagement_state["status"] = "running"
+
+    engagement_thread = threading.Thread(
+      target=engagement_loop,
+      name="engagement-loop",
+      daemon=True,
+    )
+    engagement_thread.start()
     return True
 
 
@@ -641,6 +778,21 @@ class DashboardLogHandler(logging.Handler):
             bot_state["log_lines"] = bot_state["log_lines"][-200:]
 
 
+def _append_dashboard_log(message: str, level: str = "INFO"):
+  """Append a formatted log line directly to dashboard state."""
+  clean_message = str(message or "").strip()
+  if not clean_message:
+    return
+
+  clean_level = str(level or "INFO").strip().upper() or "INFO"
+  timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  formatted = f"{timestamp} | {clean_level:<7} | {clean_message}"
+  bot_state["log_lines"].append(formatted)
+
+  if len(bot_state["log_lines"]) > 200:
+    bot_state["log_lines"] = bot_state["log_lines"][-200:]
+
+
 def _ensure_dashboard_log_handler():
     """Attach a single dashboard log handler instance to avoid duplicate log lines."""
     model_logger = logging.getLogger("model_dm_bot")
@@ -709,6 +861,114 @@ def bot_loop():
     logger.info("🛑 Bot runner stopped.")
 
 
+def engagement_loop():
+    """Run combined engagement scraping continuously until stopped."""
+    global engagement_state
+
+    setup_logging()
+    _ensure_dashboard_log_handler()
+
+    pass_num = 0
+
+    while not engagement_stop_event.is_set():
+        pass_num += 1
+        engagement_state["status"] = "running"
+        engagement_state["current_session"] = pass_num
+        engagement_state["last_run_start"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        engagement_state["next_run"] = None
+
+        logger.info(f"♻️ LIKE-COMMENT PASS #{pass_num} STARTING")
+
+        started_by = engagement_state.get("started_by", "")
+        started_by_role = engagement_state.get("started_by_role", "employee")
+        account_owner = None if started_by_role == "master" else started_by
+
+        try:
+          run_bot(
+            stop_event=engagement_stop_event,
+            account_owner=account_owner,
+            continuous_mode=True,
+            runtime_mode="target_engagement", # This is now the randomized combined mode
+          )
+        except Exception as e:
+            logger.error(f"Engagement pass #{pass_num} crashed: {e}")
+            engagement_state["errors"].append(f"Pass {pass_num}: {e}")
+
+        engagement_state["total_sessions"] = pass_num
+        engagement_state["last_run_end"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if engagement_stop_event.is_set():
+            break
+
+        if engagement_stop_event.wait(1.0):
+            break
+
+    engagement_state["status"] = "stopped"
+    engagement_state["next_run"] = None
+    engagement_state["started_by"] = ""
+    engagement_state["started_by_role"] = "employee"
+
+    try:
+      _set_comment_liking_enabled(False)
+    except Exception as e:
+      logger.debug(f"Failed to disable comment-liking setting after stop: {e}")
+
+    logger.info("🛑 Comment-liking runner stopped.")
+
+
+def heavy_comment_liking_loop():
+    """Run heavy comment-liking continuously until stopped."""
+    global heavy_cl_state
+
+    setup_logging()
+    _ensure_dashboard_log_handler()
+
+    pass_num = 0
+
+    while not heavy_cl_stop_event.is_set():
+        pass_num += 1
+        heavy_cl_state["status"] = "running"
+        heavy_cl_state["current_session"] = pass_num
+        heavy_cl_state["last_run_start"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        heavy_cl_state["next_run"] = None
+
+        logger.info(f"♻️ HEAVY COMMENT-LIKING PASS #{pass_num} STARTING")
+
+        started_by = heavy_cl_state.get("started_by", "")
+        started_by_role = heavy_cl_state.get("started_by_role", "employee")
+        account_owner = None if started_by_role == "master" else started_by
+        if started_by:
+          logger.info(
+            f"Heavy comment-liking operator: @{started_by} ({started_by_role})"
+          )
+
+        try:
+          run_bot(
+            stop_event=heavy_cl_stop_event,
+            account_owner=account_owner,
+            continuous_mode=True,
+            runtime_mode="heavy_comment_liking",
+          )
+        except Exception as e:
+            logger.error(f"Heavy comment-liking pass #{pass_num} crashed: {e}")
+            heavy_cl_state["errors"].append(f"Pass {pass_num}: {e}")
+
+        heavy_cl_state["total_sessions"] = pass_num
+        heavy_cl_state["last_run_end"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if heavy_cl_stop_event.is_set():
+            break
+
+        if heavy_cl_stop_event.wait(1.0):
+            break
+
+    heavy_cl_state["status"] = "stopped"
+    heavy_cl_state["next_run"] = None
+    heavy_cl_state["started_by"] = ""
+    heavy_cl_state["started_by_role"] = "employee"
+    logger.info("🛑 Heavy comment-liking runner stopped.")
+
+
 # ── Flask Routes ──
 @app.route("/login", methods=["GET", "POST"])
 def login():
@@ -773,6 +1033,7 @@ def api_get_config():
         "accounts_queue": [],
         "models": [],
         "messages": [],
+        "comments": [],
         "settings": {},
         "users": [],
         "current_user": user_ctx,
@@ -814,6 +1075,7 @@ def api_get_config():
 
         data["models"] = database.get_models()
         data["messages"] = database.get_messages()
+        data["comments"] = database.get_comments()
         data["settings"] = database.get_all_settings()
     except Exception as e:
         logger.error(f"Error reading config API: {e}")
@@ -1022,6 +1284,26 @@ def api_save_config(target):
                 details={
                     "message_count": len(clean_messages),
                     "message_sample": sample_messages,
+                },
+                employees_only=False,
+            )
+        elif target == "comments":
+            if not can_edit_targets:
+                return jsonify({"success": False, "error": "Not allowed to update comments"}), 403
+            if not isinstance(payload, list):
+                return jsonify({"success": False, "error": "Comments payload must be a list"}), 400
+            clean_comments = [str(c or "").strip() for c in payload if str(c or "").strip()]
+            sample_comments = "; ".join(clean_comments[:3])
+            if len(sample_comments) > 120:
+                sample_comments = sample_comments[:117] + "..."
+            database.save_comments(clean_comments)
+            _log_actor_action(
+                "update_comments",
+                target_type="config",
+                target_value="comments",
+                details={
+                    "comment_count": len(clean_comments),
+                    "comment_sample": sample_comments,
                 },
                 employees_only=False,
             )
@@ -1366,6 +1648,10 @@ def api_status():
     _refresh_total_dms_all_time()
     _ensure_telegram_polling()
     response = dict(bot_state)
+    response["heavy_cl_running"] = _is_heavy_cl_running()
+    response["heavy_cl_status"] = heavy_cl_state.get("status", "idle")
+    response["engagement_running"] = _is_engagement_bot_running()
+    response["engagement_status"] = engagement_state.get("status", "idle")
     cluster_control = _get_cluster_control_payload()
     if cluster_control:
       response["cluster_desired_state"] = cluster_control.get("desired_state", "")
@@ -1387,6 +1673,12 @@ def add_no_cache_headers(response):
 @login_required
 def start_bot():
     user_ctx = _current_user_context()
+
+    if _is_comment_liking_bot_running():
+      return "Comment-liking bot is running. Stop it before starting DM bot.", 409
+
+    if _is_heavy_cl_running():
+      return "Heavy comment-liking bot is running. Stop it before starting DM bot.", 409
 
     try:
       _publish_cluster_control(
@@ -1484,12 +1776,23 @@ def _is_inbox_replier_enabled() -> bool:
   )
 
 
+def _is_comment_liking_enabled() -> bool:
+  return _parse_bool_flag(
+    database.get_setting(COMMENT_LIKING_ENABLED_SETTING_KEY, False),
+    default=False,
+  )
+
+
 def _set_inbox_scraper_enabled(enabled: bool):
   database.save_settings({INBOX_SCRAPER_ENABLED_SETTING_KEY: bool(enabled)})
 
 
 def _set_inbox_replier_enabled(enabled: bool):
   database.save_settings({INBOX_REPLIER_ENABLED_SETTING_KEY: bool(enabled)})
+
+
+def _set_comment_liking_enabled(enabled: bool):
+  database.save_settings({COMMENT_LIKING_ENABLED_SETTING_KEY: bool(enabled)})
 
 
 def _mark_inbox_scrape_stopped(message: str = "Scrape stopped by user."):
@@ -2150,6 +2453,12 @@ def api_inbox_replier_control():
   if action not in ("start", "stop"):
     return jsonify({"success": False, "error": "action must be 'start' or 'stop'"}), 400
 
+  if action == "start" and _is_comment_liking_bot_running():
+    return jsonify({
+      "success": False,
+      "error": "Comment-liking bot is running. Stop it before starting chat replier.",
+    }), 409
+
   enabled = action == "start"
   _set_inbox_replier_enabled(enabled)
 
@@ -2166,6 +2475,107 @@ def api_inbox_replier_control():
     "action": action,
     "message": "Chat replier started" if enabled else "Chat replier stopped",
     "replier_enabled": _is_inbox_replier_enabled(),
+  })
+
+
+@app.route("/api/bot/engagement/control", methods=["POST"], strict_slashes=False)
+@login_required
+def api_engagement_control():
+  payload = request.get_json(silent=True) or {}
+  action = str(payload.get("action", "") or "").strip().lower()
+  if action not in ("start", "stop"):
+    return jsonify({"success": False, "error": "action must be 'start' or 'stop'"}), 400
+  user_ctx = _current_user_context()
+  actor = str(user_ctx.get("username", "") or "").strip().lower() or "unknown"
+
+  if action == "start":
+    if _is_engagement_bot_running():
+      return jsonify({"success": False, "error": "Engagement bot is already running"})
+
+    _set_comment_liking_enabled(True)
+    started = _start_engagement_loop(
+      started_by=user_ctx.get("username", ""),
+      started_by_role=user_ctx.get("role", "employee"),
+    )
+    is_running = _is_engagement_bot_running()
+    if started:
+      message = "Like-Comment bot started"
+      _append_dashboard_log(f"✅ Like-Comment bot STARTED by @{actor}", level="INFO")
+    else:
+      message = "Like-Comment bot is already running"
+  else:
+    _set_comment_liking_enabled(False)
+    was_running = _request_engagement_stop()
+    is_running = _is_engagement_bot_running()
+    message = "Like-Comment bot stopping" if was_running else "Like-Comment bot stopped"
+    _append_dashboard_log(f"⏹️ Like-Comment bot STOP requested by @{actor}", level="INFO")
+
+  _log_actor_action(
+    "engagement_control",
+    target_type="runtime",
+    target_value="engagement",
+    details={
+      "action": action,
+      "enabled": bool(is_running),
+      "status": engagement_state.get("status", "idle"),
+    },
+    employees_only=False,
+  )
+
+  return jsonify({
+    "success": True,
+    "action": action,
+    "message": message,
+    "engagement_enabled": bool(is_running),
+    "engagement_status": engagement_state.get("status", "idle"),
+  })
+
+
+@app.route("/api/heavy-comment-liking/control", methods=["POST"])
+@login_required
+def api_heavy_comment_liking_control():
+  payload = request.get_json(silent=True) or {}
+  action = str(payload.get("action", "") or "").strip().lower()
+  if action not in ("start", "stop"):
+    return jsonify({"success": False, "error": "action must be 'start' or 'stop'"}), 400
+  user_ctx = _current_user_context()
+  actor = str(user_ctx.get("username", "") or "").strip().lower() or "unknown"
+
+  if action == "start" and _is_bot_running():
+    return jsonify({
+      "success": False,
+      "error": "DM bot is already running. Stop it first.",
+    }), 409
+
+  if action == "start" and _is_comment_liking_bot_running():
+    return jsonify({
+      "success": False,
+      "error": "Comment-liking bot is already running. Stop it first.",
+    }), 409
+
+  if action == "start":
+    started = _start_heavy_cl_loop(
+      started_by=user_ctx.get("username", ""),
+      started_by_role=user_ctx.get("role", "employee"),
+    )
+    is_running = _is_heavy_cl_running()
+    if started:
+      message = "Heavy comment-liking bot started"
+      _append_dashboard_log(f"✅ Heavy comment-liking bot STARTED by @{actor}", level="INFO")
+    else:
+      message = "Heavy comment-liking bot is already running"
+  else:
+    was_running = _request_heavy_cl_stop()
+    is_running = _is_heavy_cl_running()
+    message = "Heavy comment-liking bot stopping" if was_running else "Heavy comment-liking bot stopped"
+    _append_dashboard_log(f"⏹️ Heavy comment-liking bot STOP requested by @{actor}", level="INFO")
+
+  return jsonify({
+    "success": True,
+    "action": action,
+    "message": message,
+    "heavy_cl_status": heavy_cl_state.get("status", "idle"),
+    "heavy_cl_running": bool(is_running),
   })
 
 
@@ -2476,6 +2886,8 @@ def api_inbox_reply():
     "thread_id": thread_id,
     "message": "Reply queued for bot runtime",
   })
+
+
 
 
 @app.route("/api/inbox/reply/status/<job_id>", methods=["GET"])
