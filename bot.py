@@ -1908,6 +1908,10 @@ def _idle_browse_home_feed(driver, username: str, stop_event=None):
         # Simulate reading time — longer pauses than active engagement
         if _interruptible_sleep(random.uniform(2.0, 5.0), stop_event=stop_event):
             break
+        
+        # Check for lockout during browsing
+        if _check_for_challenges_and_alert(driver, username, context="during idle browsing"):
+            break
 
     log_and_telegram(f"[{username}] 📱 Finished browsing ({scroll_count} scrolls)")
 
@@ -2186,6 +2190,10 @@ def _process_heavy_comment_liking(
                     if _find_post_dialog_container(driver) is not None or "/p/" in current_url or "/reel/" in current_url:
                         _close_post_view_and_return_feed(driver)
                 human_delay(0.5, 1.0)
+
+                # Check for lockout after interaction
+                if _check_for_challenges_and_alert(driver, username, context="during heavy comment-liking"):
+                    return liked_posts + commented_posts
 
                 log_and_telegram(
                     f"[{username}] ✅ Post {processed_posts}/{target_posts} — "
@@ -3012,20 +3020,8 @@ def _dm_list(
             coordinator.release_target_claim(target_user, claim_token)
 
         # Check for challenges mid-session
-        challenge = detect_challenge(driver)
-        if challenge != ChallengeType.NONE:
-            log_and_telegram(f"[{sender}] 🔒 Challenge detected mid-session: {challenge.value}")
-            telegram_bot.send_challenge_alert(sender, challenge.value)
-
-            if challenge == ChallengeType.LOCKED:
-                telegram_bot.send_lockout_alert(sender, "Account locked during DM session")
-                _mark_account_suspended(sender, "locked during DM session")
-                break
-            else:
-                log_and_telegram(
-                    f"[{sender}] ⏭️ Challenge ({challenge.value}) auto-skipped during DM session."
-                )
-                break
+        if _check_for_challenges_and_alert(driver, sender, context="during DM session"):
+            break
 
         # Random delay between DMs
         if sent < max_dms and target_user != usernames[-1]:
