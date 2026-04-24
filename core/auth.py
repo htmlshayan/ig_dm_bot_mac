@@ -117,17 +117,62 @@ def detect_challenge(driver) -> ChallengeType:
     return ChallengeType.NONE
 
 
+def _has_sessionid_cookie(driver) -> bool:
+    """Return True when browser currently has a non-empty Instagram sessionid cookie."""
+    try:
+        cookies = driver.get_cookies()
+    except Exception:
+        return False
+
+    for cookie in cookies:
+        name = str(cookie.get("name", "")).strip().lower()
+        if name != "sessionid":
+            continue
+
+        value = str(cookie.get("value", "") or "").strip()
+        if value:
+            return True
+
+    return False
+
+
 def is_logged_in(driver) -> bool:
     """Check if we're currently logged into Instagram."""
     try:
-        current_url = driver.current_url.lower()
-        
-        # If we are strictly on the login page or a challenge page, we are not fully logged in.
-        if "/accounts/login" in current_url:
+        current_url = str(driver.current_url or "").lower()
+
+        # Explicit unauthenticated surfaces.
+        unauth_url_markers = (
+            "/accounts/login",
+            "/accounts/onetap",
+            "/accounts/emailsignup",
+            "/accounts/password/reset",
+        )
+        if any(marker in current_url for marker in unauth_url_markers):
             return False
-            
+
         challenge = detect_challenge(driver)
         if challenge != ChallengeType.NONE:
+            return False
+
+        # If login form fields are visible, we are still logged out.
+        try:
+            login_form_fields = driver.find_elements(
+                By.CSS_SELECTOR,
+                "input[name='username'], input[name='email'], input[name='password'], input[name='pass']",
+            )
+        except Exception:
+            login_form_fields = []
+
+        for field in login_form_fields:
+            try:
+                if field.is_displayed():
+                    return False
+            except Exception:
+                continue
+
+        # Require authenticated browser cookie state.
+        if not _has_sessionid_cookie(driver):
             return False
 
         # Look for logged-in indicators
@@ -146,7 +191,7 @@ def is_logged_in(driver) -> bool:
             except Exception:
                 continue
 
-        # Fallback: if we're not on login page and no challenge is found, probably logged in
+        # Fallback: URL/login-form/challenge checks plus sessionid cookie are enough.
         return True
     except Exception:
         return False
@@ -198,6 +243,11 @@ def login_with_cookies(driver, account: dict) -> bool:
     # Inject cookies
     if not load_cookies(driver, username):
         logger.warning(f"[{username}] Failed to inject cookies")
+        return False
+
+    if not _has_sessionid_cookie(driver):
+        logger.warning(f"[{username}] Cookie injection did not apply sessionid in browser")
+        delete_cookies(username)
         return False
 
     # Reload page with cookies
@@ -331,7 +381,7 @@ def login_with_credentials(driver, account: dict) -> bool:
             return False
 
         logger.warning(f"[{username}] Login may have failed — URL: {driver.current_url}")
-        return "/accounts/login" not in driver.current_url
+        return False
 
     except TimeoutException as e:
         logger.error(f"[{username}] Timeout waiting for login elements: {e}")
