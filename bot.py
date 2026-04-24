@@ -299,13 +299,27 @@ def _check_for_challenges_and_alert(driver, username, context="during interactio
 def _is_page_unavailable(driver) -> bool:
     """Detect 'Sorry, this page isn't available' Instagram error."""
     try:
-        # Check title and page source
+        # 1. Check title (Instagram usually sets title to 'Page not found • Instagram' or just 'Instagram')
         title = str(driver.title or "").lower()
-        if "page not found" in title or "available" in title:
-            # More specific check for the text
-            source = driver.page_source.lower()
-            if "sorry, this page isn't available" in source:
+        if "page not found" in title or title == "instagram":
+            return True
+
+        # 2. Check for the specific error text in the page source
+        # This covers the exact HTML snippet provided by the user
+        source = driver.page_source.lower()
+        error_markers = [
+            "sorry, this page isn't available",
+            "the link you followed may be broken",
+            "page may have been removed",
+        ]
+        
+        for marker in error_markers:
+            if marker in source:
                 return True
+                
+        # 3. Check for specific CSS classes or layout if text check is too broad
+        # (Optional: can add specific selector checks here if needed)
+        
     except Exception:
         pass
     return False
@@ -981,6 +995,7 @@ def run_bot(
             account_dm_batch_state = {
                 "sent_count": 0,
                 "last_cooldown_count": 0,
+                "sent_since_human_break": 0,
             }
 
             # Create browser + login with proxy failover (up to MAX_ACCOUNT_PROXIES)
@@ -2997,7 +3012,8 @@ def _dm_list(
     """
     sent = 0
     sent_since_break = 0
-    break_threshold = random.randint(5, 7)
+    # break_threshold is strictly 3 per user request
+    break_threshold = 3
 
     for target_user in usernames:
         if stop_event and stop_event.is_set():
@@ -3090,13 +3106,20 @@ def _dm_list(
         if _check_for_challenges_and_alert(driver, sender, context="during DM session"):
             break
 
-        # Human-like break after 5-7 DMs
+        # Human-like break after 3 DMs
         if event_status == "sent":
-            sent_since_break += 1
-            if sent_since_break >= break_threshold:
-                _do_human_like_break(driver, sender, stop_event=stop_event)
-                sent_since_break = 0
-                break_threshold = random.randint(5, 7)
+            if isinstance(dm_batch_state, dict):
+                current_c = int(dm_batch_state.get("sent_since_human_break", 0) or 0) + 1
+                dm_batch_state["sent_since_human_break"] = current_c
+                if current_c >= break_threshold:
+                    _do_human_like_break(driver, sender, stop_event=stop_event)
+                    dm_batch_state["sent_since_human_break"] = 0
+            else:
+                # Fallback if no batch state
+                sent_since_break += 1
+                if sent_since_break >= break_threshold:
+                    _do_human_like_break(driver, sender, stop_event=stop_event)
+                    sent_since_break = 0
 
         # Random delay between DMs
         if sent < max_dms and target_user != usernames[-1]:

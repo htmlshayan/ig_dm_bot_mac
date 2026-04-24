@@ -68,8 +68,13 @@ def get_recent_posts(driver, model_username: str) -> list:
     # Check if profile exists
     try:
         page_source = driver.page_source.lower()
-        if "sorry, this page isn't available" in page_source:
-            logger.warning(f"[Scraper] Profile @{model_username} not found")
+        if "sorry, this page isn't available" in page_source or "link you followed may be broken" in page_source:
+            logger.warning(f"[Scraper] Profile @{model_username} not found (page unavailable)")
+            return []
+            
+        title = str(driver.title or "").lower()
+        if "page not found" in title:
+            logger.warning(f"[Scraper] Profile @{model_username} not found (title: {title})")
             return []
     except Exception:
         pass

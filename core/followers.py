@@ -42,6 +42,20 @@ def get_followers(driver, model_username: str, already_dmd: set, max_count: int 
     driver.get(profile_url)
     human_delay(3, 5)
 
+    # Check if profile exists
+    try:
+        page_source = driver.page_source.lower()
+        if "sorry, this page isn't available" in page_source or "link you followed may be broken" in page_source:
+            logger.warning(f"[Followers] Profile @{model_username} not found (page unavailable)")
+            return []
+            
+        title = str(driver.title or "").lower()
+        if "page not found" in title:
+            logger.warning(f"[Followers] Profile @{model_username} not found (title: {title})")
+            return []
+    except Exception:
+        pass
+
     followers = []
 
     # Click the followers count link
