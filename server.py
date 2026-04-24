@@ -248,7 +248,7 @@ def _is_heavy_cl_running() -> bool:
   with heavy_cl_thread_lock:
     return bool(heavy_cl_thread and heavy_cl_thread.is_alive())
 
-def _is_engagement_bot_running() -> bool:
+def _is_comment_liking_bot_running() -> bool:
   with engagement_thread_lock:
     return bool(engagement_thread and engagement_thread.is_alive())
 
