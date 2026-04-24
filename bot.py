@@ -2020,7 +2020,11 @@ def _process_comment_liking_model(
 
             opened_post_view = False
             try:
-                opened_post_view = _open_post_view_from_feed(driver, post_element)
+                opened_post_view = _open_comment_popup_from_feed(driver, post_element)
+                if not opened_post_view:
+                    logger.debug(f"[{username}] Could not open post popup from Comment icon, skipping post")
+                    continue
+
                 interaction_scope = _resolve_post_interaction_scope(driver, post_element)
 
                 # Check if already liked — skip entire post if so
@@ -2060,7 +2064,12 @@ def _process_comment_liking_model(
                     # Comment on the post
                     if comment_pool:
                         comment_text = random.choice(comment_pool)
-                        commented_now = _comment_on_home_feed_post(driver, interaction_scope, comment_text)
+                        commented_now = _comment_on_home_feed_post(
+                            driver,
+                            interaction_scope,
+                            comment_text,
+                            open_comment_section=False,
+                        )
                         if commented_now:
                             commented_posts += 1
                             log_and_telegram(
@@ -2186,8 +2195,16 @@ def _process_heavy_comment_liking(
             processed_posts += 1
 
             try:
-                # Step 1: Click the Like button
-                liked = _like_home_feed_post(driver, post_element)
+                # Step 1: Click Comment to open popup/post view
+                opened_post_view = _heavy_click_comment_button(driver, post_element)
+                if not opened_post_view:
+                    human_delay(0.8, 1.5)
+                    continue
+
+                interaction_scope = _resolve_post_interaction_scope(driver, post_element)
+
+                # Step 2: Click Like inside popup/post view
+                liked = _like_home_feed_post(driver, interaction_scope)
                 if liked:
                     liked_posts += 1
                     if _sleep_after_comment_like_action(stop_event=stop_event):
@@ -2195,13 +2212,9 @@ def _process_heavy_comment_liking(
                 else:
                     human_delay(0.8, 1.5)
 
-                # Step 2: Click the Comment button
-                _heavy_click_comment_button(driver, post_element)
-                human_delay(0.8, 1.5)
-
-                # Step 3: Type comment in textarea and submit
+                # Step 3: Type comment in textarea and submit with Enter
                 comment_text = random.choice(comment_pool)
-                commented = _heavy_type_and_post_comment(driver, post_element, comment_text)
+                commented = _heavy_type_and_post_comment(driver, interaction_scope, comment_text)
                 if commented:
                     commented_posts += 1
                     if _sleep_after_comment_like_action(stop_event=stop_event):
@@ -2209,7 +2222,7 @@ def _process_heavy_comment_liking(
                 else:
                     human_delay(0.8, 1.5)
 
-                # Step 4: Close the popup/modal if one opened
+                # Step 4: Close the popup/modal
                 closed_popup = _heavy_click_close_popup(driver)
                 if not closed_popup:
                     try:
@@ -2408,132 +2421,18 @@ def _like_user_latest_post(driver, target_username) -> bool:
 
 
 def _heavy_click_comment_button(driver, post_element):
-    """Click the Comment button (SVG with aria-label='Comment') on a feed post."""
-    comment_xpaths = [
-        ".//*[local-name()='svg' and @aria-label='Comment']/ancestor::*[@role='button'][1]",
-        ".//*[local-name()='svg' and @aria-label='Comment']/..",
-        ".//*[local-name()='svg' and @aria-label='Comment']",
-    ]
-    for xpath in comment_xpaths:
-        try:
-            elements = post_element.find_elements(By.XPATH, xpath)
-            for el in elements:
-                try:
-                    if el.is_displayed():
-                        _safe_click(driver, el)
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-    return False
+    """Open the post popup by clicking the Comment icon on a feed post."""
+    return _open_comment_popup_from_feed(driver, post_element)
 
 
 def _heavy_type_and_post_comment(driver, post_element, comment_text: str) -> bool:
-    """Type a comment in the textarea and submit with Enter.
-
-    Instagram swaps the textarea element when you first click it, so we must:
-    1. Find the initial textarea and click it (triggers Instagram to replace it)
-    2. Re-query the DOM to find the NEW textarea
-    3. Type into the new textarea
-    4. Press Enter to submit (with fallback checks)
-    """
-    message = str(comment_text or "").strip()
-    if not message:
-        return False
-
-    textarea_xpaths = [
-        "//textarea[@aria-label='Add a comment…']",
-        "//textarea[contains(@placeholder, 'Add a comment')]",
-        "//form//textarea",
-        "//textarea",
-    ]
-
-    def _find_visible_textarea():
-        for xpath in textarea_xpaths:
-            try:
-                elements = driver.find_elements(By.XPATH, xpath)
-                for el in elements:
-                    try:
-                        if el.is_displayed():
-                            return el
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-        return None
-
-    # Step 1: Find the initial textarea and click it to trigger Instagram's swap
-    textarea = _find_visible_textarea()
-    if not textarea:
-        logger.debug("[Heavy Comment] No visible textarea found")
-        return False
-
-    try:
-        try:
-            textarea.click()
-        except Exception:
-            _safe_click(driver, textarea)
-    except Exception:
-        pass
-
-    # Step 2: Wait for Instagram to swap the textarea element, then re-find it
-    human_delay(0.8, 1.2)
-
-    textarea = _find_visible_textarea()
-    if not textarea:
-        logger.debug("[Heavy Comment] Textarea not found after click/swap")
-        return False
-
-    try:
-        # Step 3: Click the new textarea to focus it, then type
-        try:
-            textarea.click()
-        except Exception:
-            _safe_click(driver, textarea)
-        human_delay(0.2, 0.4)
-
-        # Type the message character by character is too slow, send_keys is fine
-        textarea.send_keys(message)
-        human_delay(0.8, 1.2)
-
-        # Step 4: Always press Enter to submit. This is more reliable than Post button clicks.
-        if _submit_comment_with_enter(driver, textarea, expected_message=message):
-            human_delay(2.0, 3.0)
-            return True
-
-        # Fallback: try Post button if Enter did not submit
-        post_xpaths = [
-            "//div[@role='button'][.//span[text()='Post']]",
-            "//form//div[@role='button'][.//span[text()='Post']]",
-            "//div[contains(@class,'x13fj5qh')]//div[@role='button']",
-        ]
-        for xpath in post_xpaths:
-            try:
-                buttons = driver.find_elements(By.XPATH, xpath)
-            except Exception:
-                buttons = []
-
-            for btn in buttons:
-                try:
-                    if not btn.is_displayed():
-                        continue
-                    if str(btn.get_attribute("aria-disabled") or "").strip().lower() == "true":
-                        continue
-
-                    if _safe_click(driver, btn):
-                        # Press Enter once more to ensure submit action is triggered.
-                        _submit_comment_with_enter(driver, textarea, expected_message=message)
-                        human_delay(2.0, 3.0)
-                        return True
-                except Exception:
-                    continue
-
-        return False
-
-    except Exception as e:
-        logger.debug(f"[Heavy Comment] Failed to post comment: {e}")
-        return False
+    """Type a comment in the open popup and submit with Enter."""
+    return _comment_on_home_feed_post(
+        driver,
+        post_element,
+        comment_text,
+        open_comment_section=False,
+    )
 
 
 def _heavy_click_close_popup(driver):
@@ -2605,6 +2504,56 @@ def _extract_home_feed_post_url(post_element) -> str:
         return href.split("?")[0]
 
     return ""
+
+
+def _open_comment_popup_from_feed(driver, post_element) -> bool:
+    """Open post popup from home feed by clicking the Comment icon first."""
+    comment_trigger_xpaths = [
+        ".//*[local-name()='svg' and @aria-label='Comment']/ancestor::*[@role='button' or local-name()='button'][1]",
+        ".//*[local-name()='svg' and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button' or local-name()='button'][1]",
+        ".//*[local-name()='svg' and @aria-label='Comment']/..",
+        ".//*[local-name()='svg' and @aria-label='Comment']",
+    ]
+
+    def _is_popup_or_post_open() -> bool:
+        if _find_post_dialog_container(driver) is not None:
+            return True
+
+        try:
+            current_url = str(driver.current_url or "")
+        except Exception:
+            current_url = ""
+
+        return "/p/" in current_url or "/reel/" in current_url
+
+    for xpath in comment_trigger_xpaths:
+        try:
+            triggers = post_element.find_elements(By.XPATH, xpath)
+        except Exception:
+            triggers = []
+
+        for trigger in triggers:
+            try:
+                if not trigger.is_displayed():
+                    continue
+            except Exception:
+                continue
+
+            if not _safe_click(driver, trigger):
+                continue
+
+            human_delay(0.4, 0.8)
+            timeout_at = time.time() + 3.0
+            while time.time() < timeout_at:
+                if _is_popup_or_post_open():
+                    return True
+                time.sleep(0.2)
+
+            if _is_popup_or_post_open():
+                return True
+
+    # Fallback: open from post permalink if Comment icon click did not open the popup.
+    return _open_post_view_from_feed(driver, post_element)
 
 
 def _open_post_view_from_feed(driver, post_element) -> bool:
@@ -2841,8 +2790,8 @@ def _like_home_feed_post(driver, post_element) -> bool:
     return False
 
 
-def _comment_on_home_feed_post(driver, post_element, comment_text: str) -> bool:
-    """Leave a comment on a feed post using the visible comment input.
+def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_comment_section: bool = True) -> bool:
+    """Leave a comment on a feed post/popup using the visible comment input.
 
     Instagram replaces the textarea element when you first click it,
     so we click once, wait, then re-query the DOM for the fresh textarea.
@@ -2851,23 +2800,24 @@ def _comment_on_home_feed_post(driver, post_element, comment_text: str) -> bool:
     if not message:
         return False
 
-    # 1. Click the comment icon to open the section
-    comment_trigger_xpaths = [
-        ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]/ancestor::*[@role='button' or local-name()='button'][1]",
-        ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]/..",
-        ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]"
-    ]
+    if open_comment_section:
+        # 1. Click the comment icon to open the section.
+        comment_trigger_xpaths = [
+            ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]/ancestor::*[@role='button' or local-name()='button'][1]",
+            ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]/..",
+            ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]"
+        ]
 
-    for xpath in comment_trigger_xpaths:
-        try:
-            triggers = post_element.find_elements(By.XPATH, xpath)
-            for trigger in triggers:
-                if trigger.is_displayed():
-                    _safe_click(driver, trigger)
-                    human_delay(0.5, 1.0)
-                    break
-        except Exception:
-            pass
+        for xpath in comment_trigger_xpaths:
+            try:
+                triggers = post_element.find_elements(By.XPATH, xpath)
+                for trigger in triggers:
+                    if trigger.is_displayed():
+                        _safe_click(driver, trigger)
+                        human_delay(0.5, 1.0)
+                        break
+            except Exception:
+                pass
 
     textarea_xpaths = [
         "//textarea[@aria-label='Add a comment…']",
