@@ -793,6 +793,31 @@ def _append_dashboard_log(message: str, level: str = "INFO"):
     bot_state["log_lines"] = bot_state["log_lines"][-200:]
 
 
+def _send_like_comment_lifecycle_telegram(action: str, is_heavy: bool = False, requested_by: str = ""):
+  """Send Telegram lifecycle alerts for like-comment runtimes."""
+  clean_action = str(action or "").strip().lower()
+  if clean_action not in ("start", "stop"):
+    return
+
+  clean_actor = str(requested_by or "").strip().lstrip("@")
+
+  try:
+    if clean_action == "start":
+      telegram_bot.send_engagement_startup(is_heavy=is_heavy)
+      return
+
+    mode_label = "HEAVY COMMENT-LIKING BOT" if is_heavy else "LIKE-COMMENT BOT"
+    actor_line = f"👤 Requested by: @{clean_actor}\n" if clean_actor else ""
+    telegram_bot.send(
+      f"🛑 *{mode_label} STOPPED*\n\n"
+      f"⏰ Time: {datetime.now().strftime('%H:%M:%S')}\n"
+      f"{actor_line}"
+      "Use `/status` for current state"
+    )
+  except Exception as e:
+    logger.warning(f"Failed to send like-comment lifecycle Telegram alert ({clean_action}): {e}")
+
+
 def _ensure_dashboard_log_handler():
     """Attach a single dashboard log handler instance to avoid duplicate log lines."""
     model_logger = logging.getLogger("model_dm_bot")
@@ -2501,6 +2526,7 @@ def api_engagement_control():
     if started:
       message = "Like-Comment bot started"
       _append_dashboard_log(f"✅ Like-Comment bot STARTED by @{actor}", level="INFO")
+      _send_like_comment_lifecycle_telegram("start", is_heavy=False, requested_by=actor)
     else:
       message = "Like-Comment bot is already running"
   else:
@@ -2509,6 +2535,8 @@ def api_engagement_control():
     is_running = _is_engagement_bot_running()
     message = "Like-Comment bot stopping" if was_running else "Like-Comment bot stopped"
     _append_dashboard_log(f"⏹️ Like-Comment bot STOP requested by @{actor}", level="INFO")
+    if was_running:
+      _send_like_comment_lifecycle_telegram("stop", is_heavy=False, requested_by=actor)
 
   _log_actor_action(
     "engagement_control",
@@ -2562,6 +2590,7 @@ def api_heavy_comment_liking_control():
     if started:
       message = "Heavy comment-liking bot started"
       _append_dashboard_log(f"✅ Heavy comment-liking bot STARTED by @{actor}", level="INFO")
+      _send_like_comment_lifecycle_telegram("start", is_heavy=True, requested_by=actor)
     else:
       message = "Heavy comment-liking bot is already running"
   else:
@@ -2569,6 +2598,8 @@ def api_heavy_comment_liking_control():
     is_running = _is_heavy_cl_running()
     message = "Heavy comment-liking bot stopping" if was_running else "Heavy comment-liking bot stopped"
     _append_dashboard_log(f"⏹️ Heavy comment-liking bot STOP requested by @{actor}", level="INFO")
+    if was_running:
+      _send_like_comment_lifecycle_telegram("stop", is_heavy=True, requested_by=actor)
 
   return jsonify({
     "success": True,
