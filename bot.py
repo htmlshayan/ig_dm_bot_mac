@@ -1964,6 +1964,17 @@ def _process_comment_liking_model(
         if stop_event and stop_event.is_set():
             break
 
+        # Safety: Ensure we are not stuck on a post page or in a modal
+        try:
+            curr_url = str(driver.current_url or "")
+            if ("/p/" in curr_url or "/reel/" in curr_url) and _find_post_dialog_container(driver) is None:
+                log_and_telegram(f"[{username}] ⚠️ Stuck on post page. Forcing return to feed.")
+                driver.get(f"{INSTAGRAM_BASE_URL}/")
+                human_delay(3, 5)
+                _dismiss_home_feed_dialogs(driver)
+        except Exception:
+            pass
+
         feed_posts = driver.find_elements(By.XPATH, "//article")
         found_new = False
 
@@ -2691,14 +2702,22 @@ def _close_post_view_and_return_feed(driver):
     # 3. Try Browser Back (only if we navigated away from root)
     try:
         current_url = str(driver.current_url or "")
-        # Only use back() if we're actually on a post page
         if "/p/" in current_url or "/reel/" in current_url:
             driver.back()
             human_delay(1.5, 2.5)
-            # Re-check URL to see if we're back on home
             new_url = str(driver.current_url or "")
             if "/p/" not in new_url and "/reel/" not in new_url:
                 return True
+    except Exception:
+        pass
+
+    # 4. Last resort: Force Home URL if still on a post page
+    try:
+        current_url = str(driver.current_url or "")
+        if "/p/" in current_url or "/reel/" in current_url or _find_post_dialog_container(driver):
+            driver.get(f"{INSTAGRAM_BASE_URL}/")
+            human_delay(3, 5)
+            return True
     except Exception:
         pass
 
