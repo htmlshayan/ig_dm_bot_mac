@@ -296,6 +296,21 @@ def _check_for_challenges_and_alert(driver, username, context="during interactio
     return True
 
 
+def _is_page_unavailable(driver) -> bool:
+    """Detect 'Sorry, this page isn't available' Instagram error."""
+    try:
+        # Check title and page source
+        title = str(driver.title or "").lower()
+        if "page not found" in title or "available" in title:
+            # More specific check for the text
+            source = driver.page_source.lower()
+            if "sorry, this page isn't available" in source:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _mark_account_suspended(username: str, reason: str = ""):
     """Persist account as suspended so future sessions skip it automatically."""
     clean_username = str(username or "").strip().lstrip("@")
@@ -1727,6 +1742,10 @@ def _process_model(
     # Step 1: Get recent posts
     posts = get_recent_posts(driver, model_username)
     if not posts:
+        if _is_page_unavailable(driver):
+            log_and_telegram(f"[{username}] ⚠️ Profile @{model_username} is unavailable (deleted/broken). Skipping.")
+            return 0
+
         log_and_telegram(f"[{username}] No posts found for @{model_username}, going to followers")
         # Skip to followers
         followers = get_followers(driver, model_username, already_dmd, max_count=dm_target)
@@ -2273,6 +2292,10 @@ def _process_target_engagement(
     from core.scraper import get_recent_posts, get_recent_commenters
     posts = get_recent_posts(driver, model_username)
     
+    if not posts and _is_page_unavailable(driver):
+        log_and_telegram(f"[{username}] ⚠️ Profile @{model_username} is unavailable. Skipping engagement.")
+        return 0
+    
     # We only care about posts that could have recent comments
     # Usually posts under 48h are enough to check.
     for post in posts:
@@ -2329,6 +2352,11 @@ def _like_user_latest_post(driver, target_username) -> bool:
     human_delay(3, 5)
 
     try:
+        # Check if page is unavailable
+        if _is_page_unavailable(driver):
+            logger.info(f"[Bot] @{target_username} profile is unavailable, skipping")
+            return False
+
         # Check if private
         page_source = driver.page_source.lower()
         if "this account is private" in page_source:
