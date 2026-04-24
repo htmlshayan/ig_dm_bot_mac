@@ -189,13 +189,20 @@ class TelegramBot:
             "Use `/stop` to request stop"
         )
 
-    def send_engagement_startup(self):
+    def send_engagement_startup(self, is_heavy: bool = False):
         """Send Like-Comment bot startup notification."""
         self.start_time = time.time()
+        
+        header = "COMMENT/LIKE BOT STARTED"
+        if is_heavy:
+            description = "Targeting: Continuous Home Feed"
+        else:
+            description = "Randomizing: Home Feed + Target Models"
+
         self.send(
-            "🚀 *LIKE-COMMENT BOT STARTED*\n\n"
+            f"🚀 *{header}*\n\n"
             f"⏰ Time: {datetime.now().strftime('%H:%M:%S')}\n"
-            "Randomizing: Home Feed + Target Models\n"
+            f"{description}\n"
             "Use `/status` for current state\n"
             "Use `/stop` to request stop"
         )

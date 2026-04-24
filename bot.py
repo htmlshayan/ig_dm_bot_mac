@@ -835,8 +835,8 @@ def run_bot(
         expected_state="running",
     )
     if should_send_startup_bundle:
-        if target_engagement_mode or comment_liking_mode:
-            telegram_bot.send_engagement_startup()
+        if target_engagement_mode or comment_liking_mode or heavy_comment_liking_mode:
+            telegram_bot.send_engagement_startup(is_heavy=heavy_comment_liking_mode)
         else:
             telegram_bot.send_startup()
             telegram_bot.send_account_pool_summary(_build_account_pool_summary(accounts, models))
@@ -937,13 +937,19 @@ def run_bot(
             account_model_key = _normalize_account_model_label(account.get("model_label", ""))
             account_models = _models_for_account(account, models)
             
+            engagement_schedule = []
             if heavy_comment_liking_mode:
                 account_models = ["home_feed"]
             elif comment_liking_mode or target_engagement_mode:
-                # Combined Randomized Engagement Mode
-                # We mix home_feed with the models and shuffle
-                account_models = ["home_feed"] + account_models
-                random.shuffle(account_models)
+                # Interleaved Engagement Mode
+                # Build a human-like schedule that alternates between
+                # model visits, home feed sessions, and idle browsing
+                engagement_schedule = _build_engagement_schedule(account_models)
+                account_models = []  # Clear — we use the schedule instead
+                log_and_telegram(
+                    f"[{username}] 🔀 Engagement schedule: {len(engagement_schedule)} actions "
+                    f"(models + feed + idle)"
+                )
                 
             account_custom_messages = _normalize_message_list(account.get("custom_messages"))
             account_label_display = label_display
@@ -1037,62 +1043,142 @@ def run_bot(
                 continue
 
             try:
-                # Process each model allowed for this account
-                for model_username in account_models:
-                    _maybe_send_24h_dm_summary(hours=DM_SUMMARY_WINDOW_HOURS)
+                # ── Interleaved Engagement Schedule ──
+                if (comment_liking_mode or target_engagement_mode) and engagement_schedule:
+                    for step_index, action in enumerate(engagement_schedule):
+                        _maybe_send_24h_dm_summary(hours=DM_SUMMARY_WINDOW_HOURS)
 
-                    if stop_event and stop_event.is_set():
-                        log_and_telegram("🛑 Stop requested, breaking model loop.")
-                        break
+                        if stop_event and stop_event.is_set():
+                            log_and_telegram("🛑 Stop requested, breaking engagement loop.")
+                            break
 
-                    if coordinator and coordinator.enabled and not coordinator.has_account_lock(username):
-                        log_and_telegram(f"[{username}] ⚠️ Distributed lock lost, stopping account session")
-                        break
+                        if coordinator and coordinator.enabled and not coordinator.has_account_lock(username):
+                            log_and_telegram(f"[{username}] ⚠️ Distributed lock lost, stopping account session")
+                            break
 
-                    if not telegram_bot._polling:
-                        log_and_telegram("🛑 Stop requested, finishing up...")
-                        break
+                        if not telegram_bot._polling:
+                            log_and_telegram("🛑 Stop requested, finishing up...")
+                            break
 
-                    if heavy_comment_liking_mode:
-                        log_and_telegram(f"🏠 Heavy comment-liking for @{username}")
-                        telegram_bot.stats["current_model"] = "heavy_feed"
-                    elif model_username == "home_feed":
-                        log_and_telegram(f"🏠 Targeting home feed actions for @{username}")
-                        telegram_bot.stats["current_model"] = "home_feed"
-                    else:
-                        log_and_telegram(f"🎯 Targeting model: @{model_username}")
-                        telegram_bot.stats["current_model"] = model_username
+                        action_type = action[0]
+                        action_value = action[1] if len(action) > 1 else None
 
-                    model_key = _normalize_model_key(model_username) or str(model_username or "").strip().lower()
+                        if action_type == "model" and action_value:
+                            model_username = str(action_value)
+                            mini_cap = random.randint(3, 5)
+                            log_and_telegram(
+                                f"[{username}] 🎯 Model visit: @{model_username} "
+                                f"(mini-session, up to {mini_cap} users)"
+                            )
+                            telegram_bot.stats["current_model"] = model_username
 
-                    if heavy_comment_liking_mode:
-                        _process_heavy_comment_liking(
-                            driver,
-                            account,
-                            stop_event=stop_event,
-                        )
-                    elif model_username == "home_feed":
-                        _process_comment_liking_model(
-                            driver,
-                            account,
-                            model_username,
-                            already_dmd,
-                            stop_event=stop_event,
-                        )
-                    elif target_engagement_mode or comment_liking_mode:
-                        _process_target_engagement(
-                            driver,
-                            account,
-                            model_username,
-                            stop_event=stop_event,
-                            coordinator=coordinator,
-                            already_engaged=already_dmd,
-                        )
+                            _process_target_engagement(
+                                driver,
+                                account,
+                                model_username,
+                                stop_event=stop_event,
+                                coordinator=coordinator,
+                                already_engaged=already_dmd,
+                                max_users_override=mini_cap,
+                            )
 
-                    if heavy_comment_liking_mode or target_engagement_mode or comment_liking_mode:
-                        if model_key:
-                            completed_model_keys.add(model_key)
-                        telegram_bot.stats["models_processed"] = len(completed_model_keys)
+                            model_key = _normalize_model_key(model_username)
+                            if model_key:
+                                completed_model_keys.add(model_key)
+                            telegram_bot.stats["models_processed"] = len(completed_model_keys)
+
+                        elif action_type == "home_feed":
+                            post_count = int(action_value) if action_value else random.randint(3, 8)
+                            log_and_telegram(
+                                f"[{username}] 🏠 Home feed session ({post_count} posts)"
+                            )
+                            telegram_bot.stats["current_model"] = "home_feed"
+
+                            _process_comment_liking_model(
+                                driver,
+                                account,
+                                "home_feed",
+                                already_dmd,
+                                stop_event=stop_event,
+                                max_posts=post_count,
+                            )
+
+                        elif action_type == "idle":
+                            telegram_bot.stats["current_model"] = "browsing"
+                            _idle_browse_home_feed(driver, username, stop_event=stop_event)
+
+                        # Check for challenges after each action
+                        if _check_for_challenges_and_alert(driver, username, context="during engagement"):
+                            break
+
+                        # Check if still logged in
+                        if not is_logged_in(driver):
+                            log_and_telegram(f"⚠️ Lost login for @{username} during engagement")
+                            break
+
+                        # Human-like pause between actions (15-45s)
+                        pause = random.uniform(15, 45)
+                        log_and_telegram(f"[{username}] ⏳ Pausing {pause:.0f}s before next action...")
+                        if _interruptible_sleep(pause, stop_event=stop_event):
+                            break
+
+                # ── Sequential Model Loop (DM mode + heavy comment-liking) ──
+                else:
+                    for model_username in account_models:
+                        _maybe_send_24h_dm_summary(hours=DM_SUMMARY_WINDOW_HOURS)
+
+                        if stop_event and stop_event.is_set():
+                            log_and_telegram("🛑 Stop requested, breaking model loop.")
+                            break
+
+                        if coordinator and coordinator.enabled and not coordinator.has_account_lock(username):
+                            log_and_telegram(f"[{username}] ⚠️ Distributed lock lost, stopping account session")
+                            break
+
+                        if not telegram_bot._polling:
+                            log_and_telegram("🛑 Stop requested, finishing up...")
+                            break
+
+                        if heavy_comment_liking_mode:
+                            log_and_telegram(f"🏠 Heavy comment-liking for @{username}")
+                            telegram_bot.stats["current_model"] = "heavy_feed"
+                        elif model_username == "home_feed":
+                            log_and_telegram(f"🏠 Targeting home feed actions for @{username}")
+                            telegram_bot.stats["current_model"] = "home_feed"
+                        else:
+                            log_and_telegram(f"🎯 Targeting model: @{model_username}")
+                            telegram_bot.stats["current_model"] = model_username
+
+                        model_key = _normalize_model_key(model_username) or str(model_username or "").strip().lower()
+
+                        if heavy_comment_liking_mode:
+                            _process_heavy_comment_liking(
+                                driver,
+                                account,
+                                stop_event=stop_event,
+                            )
+                        elif model_username == "home_feed":
+                            _process_comment_liking_model(
+                                driver,
+                                account,
+                                model_username,
+                                already_dmd,
+                                stop_event=stop_event,
+                            )
+                        elif target_engagement_mode or comment_liking_mode:
+                            _process_target_engagement(
+                                driver,
+                                account,
+                                model_username,
+                                stop_event=stop_event,
+                                coordinator=coordinator,
+                                already_engaged=already_dmd,
+                            )
+
+                        if heavy_comment_liking_mode or target_engagement_mode or comment_liking_mode:
+                            if model_key:
+                                completed_model_keys.add(model_key)
+                            telegram_bot.stats["models_processed"] = len(completed_model_keys)
                     else:
                         # Default DM/Model flow
                         custom_messages = model_message_map.get(_normalize_model_key(model_username), [])
@@ -1260,17 +1346,7 @@ def run_bot(
             )
             if continuous_mode:
                 if should_send_stop_notice:
-                    if comment_liking_mode or heavy_comment_liking_mode:
-                        telegram_bot.send(
-                            f"🛑 *COMMENT LIKING BOT STOPPED*\n\n"
-                            f"Models processed in current pass: {len(completed_model_keys)}"
-                        )
-                    else:
-                        telegram_bot.send(
-                            f"🛑 *BOT STOPPED*\n\n"
-                            f"Current pass sent: {total_dms_sent} DMs\n"
-                            f"Models processed: {len(completed_model_keys)}"
-                        )
+                    telegram_bot.send("🛑 *BOT STOPPED*")
                 else:
                     logger.info("Skipping duplicate cluster stop Telegram notification on this VPS")
             else:
@@ -1748,12 +1824,101 @@ def _process_model(
     return dms_sent
 
 
+def _build_engagement_schedule(models: list) -> list:
+    """Build a randomized interleaved engagement schedule.
+
+    Instead of processing each model sequentially to completion,
+    this creates a human-like pattern that alternates between
+    model profile visits, home feed sessions, and idle browsing.
+
+    Returns a list of action tuples:
+      ("model", model_name)      - visit model profile, interact with a few users
+      ("home_feed", post_count)  - scroll home feed, interact with N posts
+      ("idle", None)             - idle browsing on home feed (no interactions)
+    """
+    if not models:
+        # No models configured — just do home feed sessions
+        return [("home_feed", random.randint(5, 10)) for _ in range(random.randint(4, 7))]
+
+    schedule = []
+
+    # Each model gets 2-4 short visits instead of 1 long one
+    model_visits = []
+    for model in models:
+        num_visits = random.randint(2, 4)
+        for _ in range(num_visits):
+            model_visits.append(model)
+
+    random.shuffle(model_visits)
+
+    for i, model in enumerate(model_visits):
+        # ~50% chance: add a home feed session before the model visit
+        if random.random() < 0.5:
+            home_posts = random.randint(3, 8)
+            schedule.append(("home_feed", home_posts))
+
+        # Add the model visit
+        schedule.append(("model", model))
+
+        # ~10% chance: add an idle browse after a model visit
+        if random.random() < 0.10:
+            schedule.append(("idle", None))
+
+        # Every 2-3 model visits, force a home feed session to break up the pattern
+        if (i + 1) % random.randint(2, 3) == 0:
+            home_posts = random.randint(3, 8)
+            schedule.append(("home_feed", home_posts))
+
+    # End with a short home feed session if we didn't already
+    if schedule and schedule[-1][0] != "home_feed":
+        schedule.append(("home_feed", random.randint(3, 6)))
+
+    # De-duplicate consecutive visits to the same model by inserting a home feed break
+    deduped = []
+    for action in schedule:
+        if (
+            action[0] == "model"
+            and deduped
+            and deduped[-1][0] == "model"
+            and deduped[-1][1] == action[1]
+        ):
+            deduped.append(("home_feed", random.randint(3, 5)))
+        deduped.append(action)
+
+    return deduped
+
+
+def _idle_browse_home_feed(driver, username: str, stop_event=None):
+    """Simulate idle browsing — scroll the feed without interacting.
+
+    This mimics a human passively scrolling through their feed,
+    reading posts without liking or commenting.
+    """
+    scroll_count = random.randint(3, 7)
+    log_and_telegram(f"[{username}] 📱 Browsing feed...")
+
+    driver.get(f"{INSTAGRAM_BASE_URL}/")
+    human_delay(2, 4)
+    _dismiss_home_feed_dialogs(driver)
+
+    for _ in range(scroll_count):
+        if stop_event and stop_event.is_set():
+            break
+        _scroll_home_feed(driver)
+        # Simulate reading time — longer pauses than active engagement
+        if _interruptible_sleep(random.uniform(2.0, 5.0), stop_event=stop_event):
+            break
+
+    log_and_telegram(f"[{username}] 📱 Finished browsing ({scroll_count} scrolls)")
+
+
 def _process_comment_liking_model(
     driver,
     account: dict,
     model_username: str,
     already_dmd: set,
     stop_event=None,
+    max_posts: int = None,
 ) -> int:
     """Run comment-liking flow on the Instagram home feed without sending DMs."""
     username = account["username"]
@@ -1775,7 +1940,7 @@ def _process_comment_liking_model(
             "This looks awesome!",
         ]
 
-    target = 50
+    target = max_posts if max_posts and max_posts > 0 else 50
 
     log_and_telegram(
         f"[{username}] 🏠 Comment-liking: targeting {target} feed posts (like + comment each)"
@@ -2067,6 +2232,7 @@ def _process_target_engagement(
     stop_event=None,
     coordinator=None,
     already_engaged=None,
+    max_users_override: int = None,
 ) -> int:
     """
     Engagement flow:
@@ -2075,7 +2241,8 @@ def _process_target_engagement(
     3. Like their latest post.
     """
     username = account["username"]
-    max_users = _setting_int_default("TARGET_ENGAGEMENT_MAX_USERS_PER_MODEL", 20)
+    db_max_users = _setting_int_default("TARGET_ENGAGEMENT_MAX_USERS_PER_MODEL", 20)
+    max_users = max_users_override if max_users_override and max_users_override > 0 else db_max_users
     max_age_hours = float(_setting_int_default("TARGET_ENGAGEMENT_MAX_POST_AGE_HOURS", 4))
     
     engaged_count = 0

@@ -1325,11 +1325,12 @@ def get_dm_sent_summary_last_hours(hours: int = 24, include_all_accounts: bool =
 
         rows = conn.execute(
             """
-            SELECT sender_account, COUNT(*) AS sent_count
-            FROM dm_event_log
-            WHERE status = 'sent' AND timestamp >= ?
-            GROUP BY sender_account
-            ORDER BY sent_count DESC, sender_account ASC
+            SELECT l.sender_account, COUNT(*) AS sent_count
+            FROM dm_event_log l
+            JOIN accounts a ON a.username = l.sender_account
+            WHERE l.status = 'sent' AND l.timestamp >= ? AND a.is_suspended = 0
+            GROUP BY l.sender_account
+            ORDER BY sent_count DESC, l.sender_account ASC
             """,
             (cutoff_iso,),
         ).fetchall()
@@ -1343,7 +1344,7 @@ def get_dm_sent_summary_last_hours(hours: int = 24, include_all_accounts: bool =
 
         if include_all_accounts:
             account_rows = conn.execute(
-                "SELECT username FROM accounts ORDER BY username"
+                "SELECT username FROM accounts WHERE is_suspended = 0 ORDER BY username"
             ).fetchall()
             for row in account_rows:
                 username = str(row["username"] or "").strip()
