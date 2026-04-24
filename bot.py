@@ -2506,6 +2506,74 @@ def _extract_home_feed_post_url(post_element) -> str:
     return ""
 
 
+def _do_human_like_break(driver, username, stop_event=None):
+    """
+    Perform a human-like break: Home feed interactions + Explore browsing.
+    """
+    log_and_telegram(f"[{username}] 🧘 Taking a human-like break (Home + Explore)...")
+    
+    # 1. Home Feed Activity
+    try:
+        driver.get(f"{INSTAGRAM_BASE_URL}/")
+        human_delay(3, 5)
+        _dismiss_home_feed_dialogs(driver)
+        
+        # Like/Comment 1-2 random posts
+        break_target = random.randint(1, 2)
+        _process_comment_liking_model(
+            driver, 
+            {"username": username}, 
+            "human_break", 
+            set(), 
+            stop_event=stop_event, 
+            max_posts=break_target
+        )
+    except Exception as e:
+        logger.debug(f"[{username}] Error during home break activity: {e}")
+
+    if stop_event and stop_event.is_set():
+        return
+
+    # 2. Explore Activity
+    try:
+        log_and_telegram(f"[{username}] 🔍 Browsing Explore page...")
+        driver.get(f"{INSTAGRAM_BASE_URL}/explore/")
+        human_delay(4, 7)
+        
+        # Scroll Explore for 10-20 seconds
+        scroll_start = time.time()
+        scroll_duration = random.randint(10, 20)
+        while time.time() - scroll_start < scroll_duration:
+            if stop_event and stop_event.is_set():
+                break
+            _scroll_home_feed(driver)
+            human_delay(1.5, 3.5)
+            
+        if stop_event and stop_event.is_set():
+            return
+
+        # 3. Open a random Reel on Explore
+        log_and_telegram(f"[{username}] 🎞️ Opening a random Reel on Explore...")
+        reel_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/reel/') or contains(@href, '/p/')]")
+        if reel_links:
+            target_reel = random.choice(reel_links[:12]) # Pick from top 12
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_reel)
+                human_delay(1, 2)
+                _safe_click(driver, target_reel)
+                human_delay(5, 10) # "Watch" for a bit
+                
+                # Close it
+                _close_post_view_and_return_feed(driver)
+            except Exception:
+                pass
+                
+    except Exception as e:
+        logger.debug(f"[{username}] Error during explore break activity: {e}")
+
+    log_and_telegram(f"[{username}] ✅ Break finished, returning to work.")
+
+
 def _open_comment_popup_from_feed(driver, post_element) -> bool:
     """Open post popup from home feed by clicking the Comment icon first."""
     comment_trigger_xpaths = [
@@ -2928,6 +2996,8 @@ def _dm_list(
     Returns number of DMs successfully sent.
     """
     sent = 0
+    sent_since_break = 0
+    break_threshold = random.randint(5, 7)
 
     for target_user in usernames:
         if stop_event and stop_event.is_set():
@@ -3019,6 +3089,14 @@ def _dm_list(
         # Check for challenges mid-session
         if _check_for_challenges_and_alert(driver, sender, context="during DM session"):
             break
+
+        # Human-like break after 5-7 DMs
+        if event_status == "sent":
+            sent_since_break += 1
+            if sent_since_break >= break_threshold:
+                _do_human_like_break(driver, sender, stop_event=stop_event)
+                sent_since_break = 0
+                break_threshold = random.randint(5, 7)
 
         # Random delay between DMs
         if sent < max_dms and target_user != usernames[-1]:
