@@ -2365,31 +2365,53 @@ def _process_target_engagement(
         driver.get(post_url)
         human_delay(3, 5)
 
-        # 1. Like the post itself
-        if _like_home_feed_post(driver, driver):
-            telegram_bot.stats["likes_sent"] += 1
-            database.log_engagement(username, model_username, 'like')
-            log_and_telegram(f"[{username}] ❤️ Liked model post")
-            engaged_count += 1
-            if _sleep_after_comment_like_action(stop_event=stop_event):
+        # Define available actions for this post
+        actions = ["like_post", "comment_post", "like_comments"]
+        random.shuffle(actions)
+
+        for action in actions:
+            if stop_event and stop_event.is_set():
+                break
+            if engaged_count >= max_users:
                 break
 
-        # 1b. Comment on the post itself (if pool exists)
-        comment_pool = database.get_comments()
-        if comment_pool and random.random() < 0.4: # 40% chance to comment like in home feed mode
-            comment_text = random.choice(comment_pool)
-            if _comment_on_home_feed_post(driver, driver, comment_text, open_comment_section=False):
-                telegram_bot.stats["comments_sent"] += 1
-                database.log_engagement(username, model_username, 'comment')
-                log_and_telegram(f"[{username}] 💬 Commented on model post")
-                engaged_count += 1
+            if action == "like_post":
+                # 1. Like the post itself
+                if _like_home_feed_post(driver, driver):
+                    telegram_bot.stats["likes_sent"] += 1
+                    database.log_engagement(username, model_username, 'like')
+                    log_and_telegram(f"[{username}] ❤️ Liked model post")
+                    engaged_count += 1
+                    if _sleep_after_comment_like_action(stop_event=stop_event):
+                        break
+                else:
+                    human_delay(1, 2)
+
+            elif action == "comment_post":
+                # 2. Comment on the post itself (if pool exists)
+                comment_pool = database.get_comments()
+                # 80% chance to comment on the model post when visited
+                if comment_pool and random.random() < 0.8:
+                    comment_text = random.choice(comment_pool)
+                    if _comment_on_home_feed_post(driver, driver, comment_text, open_comment_section=False):
+                        telegram_bot.stats["comments_sent"] += 1
+                        database.log_engagement(username, model_username, 'comment')
+                        log_and_telegram(f"[{username}] 💬 Commented on model post")
+                        engaged_count += 1
+                        if _sleep_after_comment_like_action(stop_event=stop_event):
+                            break
+                else:
+                    human_delay(1, 2)
+
+            elif action == "like_comments":
+                # 3. Like comments on the post (10-15 likes as requested)
+                target_likes = random.randint(10, 15)
+                comment_likes = _like_comments_on_current_post(driver, stop_event=stop_event, max_likes=target_likes)
+                engaged_count += comment_likes
+                log_and_telegram(f"[{username}] ❤️ Liked {comment_likes}/{target_likes} comments on post")
                 if _sleep_after_comment_like_action(stop_event=stop_event):
                     break
 
-        # 2. Like comments on the post
-        comment_likes = _like_comments_on_current_post(driver, stop_event=stop_event, max_likes=random.randint(3, 6))
-        engaged_count += comment_likes
-        
         if engaged_count >= max_users:
             break
 
@@ -2579,7 +2601,7 @@ def _like_comments_on_current_post(driver, stop_event=None, max_likes: int = 10)
 
     seen_buttons = set()
     
-    for _ in range(3): # Up to 3 batches of liking
+    for _ in range(5): # Up to 5 batches of liking
         if (stop_event and stop_event.is_set()) or likes_done >= max_likes:
             break
             
@@ -2594,11 +2616,18 @@ def _like_comments_on_current_post(driver, stop_event=None, max_likes: int = 10)
                 continue
         
         if not found_buttons:
-            # Try loading more one last time
+            # Try loading more
             if _click_load_more_comments(driver):
                 human_delay(1.5, 2.5)
                 continue
-            break
+            
+            # If still no buttons, try scrolling down to reveal more
+            try:
+                driver.execute_script("window.scrollBy(0, 500);")
+                human_delay(1.2, 2.0)
+                continue
+            except Exception:
+                break
 
         random.shuffle(found_buttons)
         
@@ -2611,8 +2640,7 @@ def _like_comments_on_current_post(driver, stop_event=None, max_likes: int = 10)
                 driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", btn)
                 human_delay(0.5, 1.0)
                 
-                # Check if already liked (aria-label might have changed if we are too fast, but usually it's okay)
-                # We double check the SVG inside
+                # Check if already liked
                 try:
                     svg = btn.find_element(By.TAG_NAME, "svg")
                     label = svg.get_attribute("aria-label")
@@ -2631,10 +2659,10 @@ def _like_comments_on_current_post(driver, stop_event=None, max_likes: int = 10)
             except Exception:
                 continue
         
-        # Scroll down slightly to trigger more comment loading
+        # Scroll down slightly after a batch
         try:
-            driver.execute_script("window.scrollBy(0, 300);")
-            human_delay(1.0, 2.0)
+            driver.execute_script("window.scrollBy(0, 400);")
+            human_delay(1.5, 2.5)
         except Exception:
             pass
 
