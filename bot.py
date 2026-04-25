@@ -2353,14 +2353,18 @@ def _process_target_engagement(
         return 0
     
     # Process each post
+    posts_processed = 0
     for post in posts:
         if stop_event and stop_event.is_set():
             break
         if engaged_count >= max_users:
             break
+        if posts_processed >= 6:
+            log_and_telegram(f"[{username}] ✅ Reached limit of 6 posts for @{model_username}")
+            break
 
         post_url = post["url"]
-        log_and_telegram(f"[{username}] 🔍 Engaging with post: {post_url[-15:]}")
+        log_and_telegram(f"[{username}] 🔍 Engaging with post {posts_processed + 1}/6: {post_url[-15:]}")
         
         driver.get(post_url)
         human_delay(3, 5)
@@ -2372,9 +2376,7 @@ def _process_target_engagement(
         for action in actions:
             if stop_event and stop_event.is_set():
                 break
-            if engaged_count >= max_users:
-                break
-
+            
             if action == "like_post":
                 # 1. Like the post itself
                 if _like_home_feed_post(driver, driver):
@@ -2412,6 +2414,8 @@ def _process_target_engagement(
                 if _sleep_after_comment_like_action(stop_event=stop_event):
                     break
 
+        posts_processed += 1
+        
         if engaged_count >= max_users:
             break
 
