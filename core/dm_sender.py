@@ -226,27 +226,79 @@ def send_dm(driver, username: str, message: str) -> str:
         return DMResult.ERROR
 
 
+def _looks_like_dm_composer_input(driver, element) -> bool:
+    if element is None:
+        return False
+
+    try:
+        role = str(element.get_attribute("role") or "").strip().lower()
+        contenteditable = str(element.get_attribute("contenteditable") or "").strip().lower()
+        aria_placeholder = str(element.get_attribute("aria-placeholder") or "").strip().lower()
+        aria_label = str(element.get_attribute("aria-label") or "").strip().lower()
+        placeholder = str(element.get_attribute("placeholder") or "").strip().lower()
+
+        is_message_like = any("message" in value for value in (aria_placeholder, aria_label, placeholder) if value)
+        if role == "textbox" and contenteditable == "true" and is_message_like:
+            return True
+    except Exception:
+        pass
+
+    try:
+        return bool(
+            driver.execute_script(
+                """
+                const input = arguments[0];
+                if (!input) return false;
+                let node = input;
+                for (let i = 0; node && i < 25; i += 1) {
+                    const sendBtn = node.querySelector("div[role='button'][aria-label='Send'], button[aria-label='Send']");
+                    const sendIcon = node.querySelector("svg[aria-label='Send']");
+                    if (sendBtn || sendIcon) return true;
+                    node = node.parentElement;
+                }
+                return false;
+                """,
+                element,
+            )
+        )
+    except Exception:
+        return False
+
+
 def _find_message_input(driver, timeout_seconds: float = 8):
-    """Find the DM text input/textarea element."""
-    input_selectors = [
-        "//div[@aria-label='Message' and @role='textbox']",
-        "//div[@role='textbox' and @contenteditable='true']",
-        "//textarea[contains(@placeholder, 'Message')]",
-        "//textarea[contains(@placeholder, 'message')]",
-        "//div[@role='dialog']//textarea",
-        "//div[contains(@class, 'x1i10hfl')]//p",
-        "//textarea",
+    """Find the DM composer text input bound to a visible Send control."""
+    locators = [
+        (By.XPATH, "//div[@role='textbox' and @contenteditable='true' and (contains(@aria-label, 'Message') or contains(@aria-placeholder, 'Message') or contains(@aria-placeholder, 'message'))]"),
+        (By.XPATH, "//textarea[contains(@placeholder, 'Message') or contains(@placeholder, 'message')]"),
+        (By.XPATH, "//div[@role='textbox' and @contenteditable='true']"),
+        (By.XPATH, "//textarea"),
     ]
 
-    for xpath in input_selectors:
-        try:
-            elem = WebDriverWait(driver, timeout_seconds).until(
-                EC.visibility_of_element_located((By.XPATH, xpath))
-            )
-            if elem:
-                return elem
-        except Exception:
-            continue
+    deadline = time.time() + max(0.5, float(timeout_seconds or 0))
+    while time.time() < deadline:
+        for by, selector in locators:
+            try:
+                elements = driver.find_elements(by, selector)
+            except Exception:
+                continue
+
+            visible = []
+            for element in elements:
+                try:
+                    if element.is_displayed():
+                        visible.append(element)
+                except Exception:
+                    continue
+
+            for element in visible:
+                if _looks_like_dm_composer_input(driver, element):
+                    return element
+
+            # Fallback for strict message selector only.
+            if visible and selector.startswith("//div[@role='textbox'"):
+                return visible[0]
+
+        time.sleep(0.2)
 
     return None
 
@@ -304,17 +356,28 @@ def _read_message_draft(driver, text_area):
 
 
 def _is_submit_confirmed(driver, text_area, baseline_text: str = "") -> bool:
-    """Treat submit as successful only when draft text is cleared."""
-    current_draft = _read_message_draft(driver, text_area)
-    if current_draft is None:
+    """Treat submit as successful only when the current draft is fully cleared."""
+    baseline_norm = _normalize_message_text(baseline_text)
+
+    drafts = []
+    primary_draft = _read_message_draft(driver, text_area)
+    if primary_draft is not None:
+        drafts.append(str(primary_draft))
+
+    refreshed_input = _find_message_input(driver, timeout_seconds=1.5)
+    if refreshed_input is not None and refreshed_input is not text_area:
+        refreshed_draft = _read_message_draft(driver, refreshed_input)
+        if refreshed_draft is not None:
+            drafts.append(str(refreshed_draft))
+
+    if not drafts:
         return False
 
-    if not current_draft.strip():
-        return True
+    normalized_drafts = [_normalize_message_text(item) for item in drafts]
+    if baseline_norm and any((baseline_norm in item) for item in normalized_drafts if item):
+        return False
 
-    baseline_norm = _normalize_message_text(baseline_text)
-    current_norm = _normalize_message_text(current_draft)
-    return bool(baseline_norm) and current_norm != baseline_norm
+    return all(not str(item or "").strip() for item in drafts)
 
 
 def _focus_message_input(driver, text_area) -> bool:
@@ -443,18 +506,27 @@ def _click_send_button(driver, text_area=None) -> bool:
                         return true;
                     };
 
-                    const selectors = [
-                        "div[role='button'][aria-label='Send'][tabindex]",
-                        "div[role='button'][aria-label='Send']",
-                        "button[aria-label='Send']",
-                        "button[aria-label='Send message']",
-                        "div[role='button'] svg[aria-label='Send']",
-                        "div[role='button'] title"
-                    ];
+                    const isSendButton = (btn) => {
+                        if (!isUsable(btn)) return false;
+                        const label = String(btn.getAttribute('aria-label') || '').trim().toLowerCase();
+                        const text = String(btn.innerText || btn.textContent || '').trim().toLowerCase();
+                        if (label === 'send' || label === 'send message' || text === 'send') return true;
+
+                        const svg = btn.querySelector("svg[aria-label]");
+                        const svgLabel = String(svg?.getAttribute('aria-label') || '').trim().toLowerCase();
+                        if (svgLabel === 'send') return true;
+
+                        for (const titleNode of btn.querySelectorAll('title')) {
+                            const titleText = String(titleNode.textContent || '').trim().toLowerCase();
+                            if (titleText === 'send') return true;
+                        }
+
+                        return false;
+                    };
 
                     const roots = [];
                     let node = input;
-                    for (let i = 0; node && i < 10; i += 1) {
+                    for (let i = 0; node && i < 25; i += 1) {
                         roots.push(node);
                         node = node.parentElement;
                     }
@@ -464,16 +536,10 @@ def _click_send_button(driver, text_area=None) -> bool:
 
                     for (const root of roots) {
                         if (!root || !root.querySelectorAll) continue;
-                        for (const selector of selectors) {
-                            const nodes = root.querySelectorAll(selector);
-                            for (const candidate of nodes) {
-                                if (selector.includes('title')) {
-                                    const titleText = String(candidate.textContent || '').trim().toLowerCase();
-                                    if (titleText !== 'send') continue;
-                                }
-                                if (forceClick(candidate)) {
-                                    return true;
-                                }
+                        const buttons = root.querySelectorAll("div[role='button'], button");
+                        for (const button of buttons) {
+                            if (isSendButton(button) && forceClick(button)) {
+                                return true;
                             }
                         }
                     }
@@ -489,6 +555,7 @@ def _click_send_button(driver, text_area=None) -> bool:
             pass
 
     send_btn_xpaths = [
+        "//div[@role='button' and @aria-label='Send' and .//svg[@aria-label='Send']]",
         "//div[@role='button' and @aria-label='Send']",
         "//div[@role='button' and @aria-label='Send message']",
         "//div[@role='button'][.//span[normalize-space()='Send']]",
@@ -556,13 +623,13 @@ def _send_message(driver, text_area, expected_message: str = "") -> bool:
 
             if submitted:
                 human_delay(1.0, 1.8)
-                if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
+                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
                     return True
 
             # Enter can fail silently in some sessions; try explicit Send button.
             if _click_send_button(driver, text_area=message_input):
                 human_delay(1.0, 1.8)
-                if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
+                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
                     return True
 
             # Ensure at least one more direct Enter on body before giving up this attempt.
@@ -570,7 +637,7 @@ def _send_message(driver, text_area, expected_message: str = "") -> bool:
                 body = driver.find_element(By.TAG_NAME, "body")
                 body.send_keys(Keys.ENTER)
                 human_delay(0.8, 1.4)
-                if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
+                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
                     return True
             except Exception:
                 pass

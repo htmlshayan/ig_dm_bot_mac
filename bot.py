@@ -3192,10 +3192,26 @@ def _dm_list(
         message = random.choice(messages)
 
         log_and_telegram(f"[{sender}] DMing @{target_user}...")
-        try:
-            result = send_dm(driver, target_user, message)
-        except Exception as e:
-            result = f"exception: {e}"
+        max_send_attempts = 2
+        result = DMResult.ERROR
+        for send_attempt in range(1, max_send_attempts + 1):
+            try:
+                result = send_dm(driver, target_user, message)
+            except Exception as e:
+                result = f"exception: {e}"
+
+            if result in (DMResult.SENT, DMResult.CANT_MESSAGE, DMResult.USER_NOT_FOUND):
+                if send_attempt > 1:
+                    log_and_telegram(
+                        f"[{sender}] ✅ Recovered on retry {send_attempt}/{max_send_attempts} for @{target_user}"
+                    )
+                break
+
+            if send_attempt < max_send_attempts:
+                log_and_telegram(
+                    f"[{sender}] ⚠️ Submit failed for @{target_user} (attempt {send_attempt}/{max_send_attempts}). Retrying same follower..."
+                )
+                human_delay(1.5, 2.5)
         event_status = "failed"
 
         if result == DMResult.SENT:
