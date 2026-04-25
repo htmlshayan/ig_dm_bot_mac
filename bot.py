@@ -158,22 +158,40 @@ def _sleep_after_comment_like_action(stop_event=None) -> bool:
 
 def _submit_comment_with_enter(driver, comment_input, expected_message: str = "") -> bool:
     """Submit a typed comment by pressing Enter and verify submit best-effort."""
-    attempts = 2
+    attempts = 3
     for _ in range(attempts):
+        submitted = False
         try:
             comment_input.send_keys(Keys.ENTER)
+            submitted = True
         except Exception:
             try:
                 active_element = driver.switch_to.active_element
                 active_element.send_keys(Keys.ENTER)
+                submitted = True
             except Exception:
-                return False
+                pass
+
+        # Some composers only react to RETURN; retry with RETURN before giving up.
+        if not submitted:
+            try:
+                comment_input.send_keys(Keys.RETURN)
+                submitted = True
+            except Exception:
+                try:
+                    active_element = driver.switch_to.active_element
+                    active_element.send_keys(Keys.RETURN)
+                    submitted = True
+                except Exception:
+                    return False
 
         human_delay(0.7, 1.1)
 
-        # If textarea is cleared or detached after Enter, treat as submitted.
+        # If textbox is cleared or detached after submit, treat as submitted.
         try:
             remaining_text = str(comment_input.get_attribute("value") or "").strip()
+            if not remaining_text:
+                remaining_text = str(comment_input.get_attribute("textContent") or "").strip()
         except Exception:
             return True
 
@@ -2065,27 +2083,9 @@ def _process_comment_liking_model(
                 interaction_scope = _resolve_post_interaction_scope(driver, post_element)
 
                 # Check if already liked — skip entire post if so
-                already_liked = False
-                try:
-                    unlike_btns = interaction_scope.find_elements(
-                        By.XPATH,
-                        ".//*[local-name()='svg' and @aria-label='Unlike']"
-                    )
-                    if unlike_btns:
-                        already_liked = True
-                except Exception:
-                    pass
-
+                already_liked = _scope_has_svg_label(interaction_scope, "Unlike")
                 if not already_liked:
-                    try:
-                        unlike_global = driver.find_elements(
-                            By.XPATH,
-                            "//div[@role='dialog']//*[local-name()='svg' and @aria-label='Unlike']"
-                        )
-                        if unlike_global:
-                            already_liked = True
-                    except Exception:
-                        pass
+                    already_liked = _dialog_has_svg_label(driver, "Unlike")
 
                 if already_liked:
                     logger.debug(f"[{username}] Post {processed}/{target} already liked, skipping")
@@ -2443,44 +2443,36 @@ def _like_user_latest_post(driver, target_username) -> bool:
             logger.info(f"[Bot] @{target_username} is private, skipping")
             return False
             
-        # Find first post
-        post_xpath = "//a[contains(@href, '/p/') or contains(@href, '/reel/')]"
-        first_post = WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.XPATH, post_xpath))
-        )
-        driver.execute_script("arguments[0].click();", first_post)
-        human_delay(3, 5)
-        
-        # Like it
-        # Reuse the robust like logic from _like_home_feed_post but adapted for post view
-        like_btn = None
-        try:
-            # Look for the 'Like' SVG
-            like_svg = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//svg[@aria-label='Like']"))
-            )
-            like_btn = like_svg.find_element(By.XPATH, "./ancestor::div[@role='button'] | ./ancestor::button")
-        except Exception:
-            # Fallback selectors
-            fallbacks = [
-                "//span[@class='x1rg5ohy']//button",
-                "//section//button[.//svg[@aria-label='Like']]",
-            ]
-            for fb in fallbacks:
-                try:
-                    like_btn = driver.find_element(By.XPATH, fb)
+        # Find first visible post/reel link.
+        post_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/') or contains(@href, '/reel/')]")
+        first_post = None
+        for link in post_links:
+            try:
+                if link.is_displayed():
+                    first_post = link
                     break
-                except Exception:
-                    continue
+            except Exception:
+                continue
 
-        if like_btn:
-            human_delay(0.5, 1.2)
-            driver.execute_script("arguments[0].click();", like_btn)
+        if first_post is None and post_links:
+            first_post = post_links[0]
+
+        if first_post is None:
+            logger.warning(f"[Bot] Could not find any post for @{target_username}")
+            return False
+
+        if not _safe_click(driver, first_post):
+            logger.warning(f"[Bot] Could not open latest post for @{target_username}")
+            return False
+
+        human_delay(3, 5)
+
+        if _like_home_feed_post(driver, driver):
             human_delay(1, 2)
             return True
-        else:
-            logger.warning(f"[Bot] Could not find Like button for @{target_username}")
-            return False
+
+        logger.warning(f"[Bot] Could not find Like button for @{target_username}")
+        return False
 
     except Exception as e:
         logger.error(f"[Bot] Error liking post for @{target_username}: {e}")
@@ -2726,12 +2718,7 @@ def _do_human_like_break(driver, username, stop_event=None):
 
 def _open_comment_popup_from_feed(driver, post_element) -> bool:
     """Open post popup from home feed by clicking the Comment icon first."""
-    comment_trigger_xpaths = [
-        ".//*[local-name()='svg' and @aria-label='Comment']/ancestor::*[@role='button' or local-name()='button'][1]",
-        ".//*[local-name()='svg' and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]/ancestor::*[@role='button' or local-name()='button'][1]",
-        ".//*[local-name()='svg' and @aria-label='Comment']/..",
-        ".//*[local-name()='svg' and @aria-label='Comment']",
-    ]
+    comment_trigger_xpaths = _svg_button_xpaths("Comment", absolute=False)
 
     def _is_popup_or_post_open() -> bool:
         if _find_post_dialog_container(driver) is not None:
@@ -2919,10 +2906,75 @@ def _close_post_view_and_return_feed(driver):
     return False
 
 
+_XPATH_UPPER_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_XPATH_LOWER_ALPHA = "abcdefghijklmnopqrstuvwxyz"
+
+
+def _svg_label_predicate(label: str) -> str:
+    """Build an XPath predicate for SVG icons using aria-label or <title> text."""
+    normalized_label = str(label or "").strip().lower()
+    return (
+        "("
+        f"translate(normalize-space(@aria-label), '{_XPATH_UPPER_ALPHA}', '{_XPATH_LOWER_ALPHA}')='{normalized_label}' "
+        "or "
+        f"./*[local-name()='title' and translate(normalize-space(string(.)), '{_XPATH_UPPER_ALPHA}', '{_XPATH_LOWER_ALPHA}')='{normalized_label}']"
+        ")"
+    )
+
+
+def _svg_button_xpaths(label: str, absolute: bool = False) -> list:
+    """Return XPath candidates for clickable controls wrapping a labeled SVG icon."""
+    prefix = "//" if absolute else ".//"
+    svg_predicate = _svg_label_predicate(label)
+    clickable_predicate = "@role='button' or @role='link' or local-name()='button'"
+
+    return [
+        f"{prefix}article//section//*[local-name()='svg' and {svg_predicate}]/ancestor::*[{clickable_predicate}][1]",
+        f"{prefix}section//*[local-name()='svg' and {svg_predicate}]/ancestor::*[{clickable_predicate}][1]",
+        f"{prefix}*[{clickable_predicate}][.//*[local-name()='svg' and {svg_predicate}] ]",
+        f"{prefix}//*[local-name()='svg' and {svg_predicate}]/ancestor::*[{clickable_predicate}][1]",
+        f"{prefix}//*[local-name()='svg' and {svg_predicate}]",
+    ]
+
+
+def _scope_has_svg_label(scope, label: str) -> bool:
+    """Return True when the given scope contains an SVG icon with the requested label."""
+    if scope is None:
+        return False
+
+    svg_predicate = _svg_label_predicate(label)
+    try:
+        icons = scope.find_elements(By.XPATH, f".//*[local-name()='svg' and {svg_predicate}]")
+        return bool(icons)
+    except Exception:
+        return False
+
+
+def _dialog_has_svg_label(driver, label: str) -> bool:
+    """Return True when any open dialog contains the requested labeled SVG icon."""
+    svg_predicate = _svg_label_predicate(label)
+    try:
+        icons = driver.find_elements(
+            By.XPATH,
+            f"//div[@role='dialog']//*[local-name()='svg' and {svg_predicate}]",
+        )
+        return bool(icons)
+    except Exception:
+        return False
+
+
 def _safe_click(driver, element) -> bool:
     """Best-effort click helper using JS fallback for unreliable clickable states."""
     if element is None:
         return False
+
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
+            element,
+        )
+    except Exception:
+        pass
 
     try:
         driver.execute_script("arguments[0].click();", element)
@@ -2932,41 +2984,28 @@ def _safe_click(driver, element) -> bool:
             element.click()
             return True
         except Exception:
-            return False
+            try:
+                driver.execute_script(
+                    "arguments[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));",
+                    element,
+                )
+                return True
+            except Exception:
+                return False
 
 
 def _like_home_feed_post(driver, post_element) -> bool:
     """Like a home feed post when it is currently unliked."""
-    # Check if already liked
-    try:
-        already_liked = post_element.find_elements(
-            By.XPATH,
-            ".//*[local-name()='svg' and @aria-label='Unlike']"
-        )
-        if already_liked:
-            logger.debug("[Like] Post already liked (found Unlike button)")
-            return False
-    except Exception:
-        pass
+    # Check if already liked.
+    if _scope_has_svg_label(post_element, "Unlike"):
+        logger.debug("[Like] Post already liked (found Unlike icon in scope)")
+        return False
 
-    # Also check globally if in a dialog
-    try:
-        already_liked_global = driver.find_elements(
-            By.XPATH,
-            "//div[@role='dialog']//*[local-name()='svg' and @aria-label='Unlike']"
-        )
-        if already_liked_global:
-            logger.debug("[Like] Post already liked (global Unlike found)")
-            return False
-    except Exception:
-        pass
+    if _dialog_has_svg_label(driver, "Unlike"):
+        logger.debug("[Like] Post already liked (found Unlike icon in dialog)")
+        return False
 
-    # Try to find and click the Like button
-    like_button_xpaths = [
-        ".//*[local-name()='svg' and @aria-label='Like']/ancestor::*[@role='button'][1]",
-        ".//*[local-name()='svg' and @aria-label='Like']/..",
-        ".//*[local-name()='svg' and @aria-label='Like']",
-    ]
+    like_button_xpaths = _svg_button_xpaths("Like", absolute=False)
 
     # Search within post element first
     for xpath in like_button_xpaths:
@@ -2983,12 +3022,12 @@ def _like_home_feed_post(driver, post_element) -> bool:
         except Exception:
             pass
 
-    # Fallback: search globally (useful when in dialog/modal view)
-    global_like_xpaths = [
-        "//*[local-name()='svg' and @aria-label='Like']/ancestor::*[@role='button'][1]",
-        "//div[@role='dialog']//*[local-name()='svg' and @aria-label='Like']/ancestor::*[@role='button'][1]",
-        "//*[local-name()='svg' and @aria-label='Like']/..",
-    ]
+    # Fallback: search globally (useful when in dialog/modal view).
+    global_like_xpaths = []
+    for relative_xpath in _svg_button_xpaths("Like", absolute=False):
+        if relative_xpath.startswith(".//"):
+            global_like_xpaths.append(f"//div[@role='dialog']{relative_xpath[1:]}")
+    global_like_xpaths.extend(_svg_button_xpaths("Like", absolute=True))
 
     for xpath in global_like_xpaths:
         try:
@@ -3020,46 +3059,78 @@ def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_com
 
     if open_comment_section:
         # 1. Click the comment icon to open the section.
-        comment_trigger_xpaths = [
-            ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]/ancestor::*[@role='button' or local-name()='button'][1]",
-            ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]/..",
-            ".//*[local-name()='svg' and (contains(@aria-label, 'Comment') or contains(@aria-label, 'comment'))]"
-        ]
+        comment_trigger_xpaths = _svg_button_xpaths("Comment", absolute=False)
+        clicked_trigger = False
 
         for xpath in comment_trigger_xpaths:
             try:
                 triggers = post_element.find_elements(By.XPATH, xpath)
                 for trigger in triggers:
-                    if trigger.is_displayed():
-                        _safe_click(driver, trigger)
+                    if not trigger.is_displayed():
+                        continue
+
+                    if _safe_click(driver, trigger):
+                        clicked_trigger = True
                         human_delay(0.5, 1.0)
                         break
             except Exception:
                 pass
 
-    textarea_xpaths = [
-        "//textarea[@aria-label='Add a comment…']",
-        "//textarea[contains(@placeholder, 'Add a comment')]",
+            if clicked_trigger:
+                break
+
+    relative_input_xpaths = [
+        ".//form//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
+        ".//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
+        ".//textarea[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
+        ".//form//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
+        ".//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
+        ".//form//textarea",
+        ".//textarea",
+    ]
+
+    global_input_xpaths = [
+        "//form//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
+        "//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
+        "//textarea[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
+        "//form//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
+        "//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
         "//form//textarea",
         "//textarea",
     ]
 
-    def _find_visible_textarea():
-        for xpath in textarea_xpaths:
-            try:
-                elements = driver.find_elements(By.XPATH, xpath)
+    def _find_visible_comment_input():
+        search_scopes = [post_element]
+        dialog_scope = _find_post_dialog_container(driver)
+        if dialog_scope is not None and dialog_scope is not post_element:
+            search_scopes.append(dialog_scope)
+        if post_element is not driver:
+            search_scopes.append(driver)
+
+        for scope in search_scopes:
+            xpaths = global_input_xpaths if scope is driver else relative_input_xpaths
+            for xpath in xpaths:
+                try:
+                    elements = scope.find_elements(By.XPATH, xpath)
+                except Exception:
+                    elements = []
+
                 for el in elements:
                     try:
-                        if el.is_displayed():
-                            return el
+                        if not el.is_displayed():
+                            continue
+                        if str(el.get_attribute("aria-hidden") or "").strip().lower() == "true":
+                            continue
+                        if str(el.get_attribute("disabled") or "").strip().lower() in ("true", "disabled"):
+                            continue
+                        return el
                     except Exception:
                         continue
-            except Exception:
-                pass
+
         return None
 
-    # 2. Find the initial textarea and click it (Instagram will swap it)
-    comment_input = _find_visible_textarea()
+    # 2. Find the initial textarea and click it (Instagram may swap it).
+    comment_input = _find_visible_comment_input()
     if not comment_input:
         return False
 
@@ -3073,7 +3144,7 @@ def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_com
 
     # 3. Wait for the swap, then re-find
     human_delay(0.8, 1.2)
-    comment_input = _find_visible_textarea()
+    comment_input = _find_visible_comment_input()
     if not comment_input:
         return False
 
@@ -3085,6 +3156,11 @@ def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_com
             _safe_click(driver, comment_input)
         human_delay(0.2, 0.4)
 
+        try:
+            comment_input.clear()
+        except Exception:
+            pass
+
         type_like_human(comment_input, message)
         human_delay(0.8, 1.2)
 
@@ -3093,10 +3169,12 @@ def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_com
             human_delay(2.0, 3.0)
             return True
 
-        # Fallback: click Post button if Enter did not submit, then press Enter once more.
+        # Fallback: click Post button if Enter did not submit.
         post_xpaths = [
-            "//div[@role='button'][.//span[text()='Post']]",
-            "//form//div[@role='button'][.//span[text()='Post']]",
+            "//form//*[@role='button' and (normalize-space()='Post' or normalize-space()='post' or .//span[normalize-space()='Post'] or .//span[normalize-space()='post'] or .//div[normalize-space()='Post'])]",
+            "//form//button[@type='submit' or normalize-space()='Post' or normalize-space()='post' or @aria-label='Post']",
+            "//*[@role='button' and (normalize-space()='Post' or normalize-space()='post' or .//span[normalize-space()='Post'] or .//span[normalize-space()='post'])]",
+            "//button[@type='submit' or normalize-space()='Post' or normalize-space()='post' or @aria-label='Post']",
         ]
 
         for xpath in post_xpaths:
@@ -3113,13 +3191,20 @@ def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_com
                         continue
 
                     if _safe_click(driver, btn):
-                        _submit_comment_with_enter(driver, comment_input, expected_message=message)
-                        human_delay(1.5, 2.5)
-                        return True
+                        human_delay(1.2, 2.0)
+                        try:
+                            remaining_text = str(comment_input.get_attribute("value") or "").strip()
+                            if not remaining_text:
+                                remaining_text = str(comment_input.get_attribute("textContent") or "").strip()
+                        except Exception:
+                            return True
+
+                        if not remaining_text or remaining_text.lower() != message.lower():
+                            return True
                 except Exception:
                     continue
 
-        return False
+        return _submit_comment_with_enter(driver, comment_input, expected_message=message)
     except Exception as e:
         logger.debug(f"[Comment] Failed to post comment: {e}")
         return False
