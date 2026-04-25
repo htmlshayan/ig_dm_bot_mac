@@ -9,6 +9,7 @@ import pyperclip
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -316,12 +317,80 @@ def _is_submit_confirmed(driver, text_area, baseline_text: str = "") -> bool:
     return bool(baseline_norm) and current_norm != baseline_norm
 
 
+def _focus_message_input(driver, text_area) -> bool:
+    if text_area is None:
+        return False
+
+    try:
+        text_area.click()
+        return True
+    except Exception:
+        pass
+
+    try:
+        driver.execute_script("arguments[0].focus();", text_area)
+        return True
+    except Exception:
+        return False
+
+
+def _dispatch_enter_key(driver, text_area) -> bool:
+    """Try multiple Enter dispatch paths so IG composer receives submit key."""
+    if text_area is None:
+        return False
+
+    enter_strategies = [
+        lambda: text_area.send_keys(Keys.ENTER),
+        lambda: text_area.send_keys(Keys.RETURN),
+        lambda: text_area.send_keys(Keys.CONTROL, Keys.ENTER),
+        lambda: driver.switch_to.active_element.send_keys(Keys.ENTER),
+        lambda: ActionChains(driver).send_keys(Keys.ENTER).perform(),
+    ]
+
+    for strategy in enter_strategies:
+        try:
+            strategy()
+            return True
+        except Exception:
+            continue
+
+    # Last resort: dispatch Enter keyboard events directly on the input.
+    try:
+        return bool(
+            driver.execute_script(
+                """
+                const el = arguments[0];
+                if (!el) return false;
+                el.focus();
+                const opts = {
+                    key: 'Enter',
+                    code: 'Enter',
+                    keyCode: 13,
+                    which: 13,
+                    bubbles: true,
+                    cancelable: true
+                };
+                const keyDownOk = el.dispatchEvent(new KeyboardEvent('keydown', opts));
+                const keyPressOk = el.dispatchEvent(new KeyboardEvent('keypress', opts));
+                const keyUpOk = el.dispatchEvent(new KeyboardEvent('keyup', opts));
+                return Boolean(keyDownOk || keyPressOk || keyUpOk);
+                """,
+                text_area,
+            )
+        )
+    except Exception:
+        return False
+
+
 def _click_send_button(driver) -> bool:
     send_btn_xpaths = [
         "//div[@role='button'][.//span[normalize-space()='Send']]",
         "//button[normalize-space()='Send']",
         "//*[@aria-label='Send' and (@role='button' or self::button)]",
+        "//*[@aria-label='Send message' and (@role='button' or self::button)]",
         "//div[@role='button' and normalize-space()='Send']",
+        "//button[@type='submit' and (normalize-space()='Send' or @aria-label='Send') ]",
+        "//button[@type='submit'][.//*[contains(translate(normalize-space(.), 'SEND', 'send'), 'send')]]",
     ]
 
     for xpath in send_btn_xpaths:
@@ -334,6 +403,34 @@ def _click_send_button(driver) -> bool:
         except Exception:
             continue
 
+    try:
+        button = driver.execute_script(
+            """
+            const candidates = Array.from(document.querySelectorAll("button, [role='button']"));
+            for (const el of candidates) {
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+                if (el.disabled) continue;
+
+                const label = String(el.getAttribute('aria-label') || '').trim().toLowerCase();
+                const text = String(el.innerText || el.textContent || '').trim().toLowerCase();
+                if (
+                    label === 'send'
+                    || label === 'send message'
+                    || text === 'send'
+                ) {
+                    return el;
+                }
+            }
+            return null;
+            """
+        )
+        if button is not None:
+            driver.execute_script("arguments[0].click();", button)
+            return True
+    except Exception:
+        pass
+
     return False
 
 
@@ -342,45 +439,34 @@ def _send_message(driver, text_area, expected_message: str = "") -> bool:
     try:
         baseline_text = str(expected_message or _read_message_draft(driver, text_area) or "").strip()
 
-        for attempt in range(2):
-            # Ensure focus before sending Enter.
-            try:
-                text_area.click()
-            except Exception:
-                try:
-                    driver.execute_script("arguments[0].focus();", text_area)
-                except Exception:
-                    pass
+        for attempt in range(3):
+            message_input = _find_message_input(driver, timeout_seconds=2) or text_area
+            _focus_message_input(driver, message_input)
 
             human_delay(0.4, 0.9)
 
-            submitted = False
-            for key in (Keys.ENTER, Keys.RETURN):
-                try:
-                    text_area.send_keys(key)
-                    submitted = True
-                    break
-                except Exception:
-                    continue
-
-            if not submitted:
-                try:
-                    active = driver.switch_to.active_element
-                    active.send_keys(Keys.ENTER)
-                    submitted = True
-                except Exception:
-                    submitted = False
+            submitted = _dispatch_enter_key(driver, message_input)
 
             if submitted:
                 human_delay(1.0, 1.8)
-                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
+                if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
                     return True
 
             # Enter can fail silently in some sessions; try explicit Send button.
             if _click_send_button(driver):
                 human_delay(1.0, 1.8)
-                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
+                if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
                     return True
+
+            # Ensure at least one more direct Enter on body before giving up this attempt.
+            try:
+                body = driver.find_element(By.TAG_NAME, "body")
+                body.send_keys(Keys.ENTER)
+                human_delay(0.8, 1.4)
+                if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
+                    return True
+            except Exception:
+                pass
 
             logger.warning(f"[DM] Submit attempt {attempt + 1} not confirmed")
 
