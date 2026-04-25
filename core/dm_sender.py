@@ -213,7 +213,7 @@ def send_dm(driver, username: str, message: str) -> str:
 
         # Step 6: Submit using Enter key (more reliable than UI Send button in long runs)
         logger.info(f"[DM] Submitting message with Enter key...")
-        if _send_message(driver, text_area):
+        if _send_message(driver, text_area, expected_message=final_message):
             logger.info(f"[DM] ✅ Message sent to @{username}")
             return DMResult.SENT
         else:
@@ -225,7 +225,7 @@ def send_dm(driver, username: str, message: str) -> str:
         return DMResult.ERROR
 
 
-def _find_message_input(driver):
+def _find_message_input(driver, timeout_seconds: float = 8):
     """Find the DM text input/textarea element."""
     input_selectors = [
         "//div[@aria-label='Message' and @role='textbox']",
@@ -239,7 +239,7 @@ def _find_message_input(driver):
 
     for xpath in input_selectors:
         try:
-            elem = WebDriverWait(driver, 8).until(
+            elem = WebDriverWait(driver, timeout_seconds).until(
                 EC.visibility_of_element_located((By.XPATH, xpath))
             )
             if elem:
@@ -250,50 +250,141 @@ def _find_message_input(driver):
     return None
 
 
-def _send_message(driver, text_area) -> bool:
-    """Submit message using Enter key or Send button fallback."""
+def _normalize_message_text(text: str) -> str:
+    return " ".join(str(text or "").split()).strip().lower()
+
+
+def _extract_input_text(driver, element):
+    """Read current draft text from textarea/contenteditable input."""
+    if element is None:
+        return None
+
     try:
-        # Ensure focus before sending Enter
-        try:
-            text_area.click()
-        except Exception:
-            driver.execute_script("arguments[0].focus();", text_area)
-        human_delay(0.5, 1.0)
+        value = element.get_attribute("value")
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
 
-        # 1. Primary submit: Enter on message input
-        text_area.send_keys(Keys.ENTER)
-        human_delay(1.5, 2.5)
-        
-        # Check if text is still there (if so, Enter didn't work)
-        try:
-            val = text_area.text or text_area.get_attribute("value") or ""
-            if not val.strip():
-                return True # Looks like it's gone (sent)
-        except Exception:
-            return True # If we can't check, assume it might have worked or element changed
+    try:
+        raw_text = driver.execute_script(
+            """
+            const el = arguments[0];
+            if (!el) return null;
+            if (typeof el.value === 'string') return el.value;
+            return (el.innerText || el.textContent || '');
+            """,
+            element,
+        )
+        if raw_text is not None:
+            return str(raw_text)
+    except Exception:
+        pass
 
-        # 2. Try the 'Send' button explicitly
-        send_btn_xpaths = [
-            "//button[text()='Send']",
-            "//button[normalize-space()='Send']",
-            "//div[@role='button' and text()='Send']",
-            "//button[contains(@class, 'x1i10hfl') and text()='Send']"
-        ]
-        for xpath in send_btn_xpaths:
-            try:
-                btn = driver.find_element(By.XPATH, xpath)
-                if btn.is_displayed():
-                    driver.execute_script("arguments[0].click();", btn)
-                    human_delay(2, 3)
-                    return True
-            except Exception:
-                continue
+    try:
+        return str(element.text or "")
+    except Exception:
+        return None
 
-        # 3. Fallback: Enter on active element
-        active = driver.switch_to.active_element
-        active.send_keys(Keys.ENTER)
-        human_delay(2, 3)
+
+def _read_message_draft(driver, text_area):
+    """Best-effort read of current message draft text; None means unreadable."""
+    draft = _extract_input_text(driver, text_area)
+    if draft is not None:
+        return str(draft).strip()
+
+    refreshed_input = _find_message_input(driver, timeout_seconds=2)
+    if refreshed_input:
+        refreshed_draft = _extract_input_text(driver, refreshed_input)
+        if refreshed_draft is not None:
+            return str(refreshed_draft).strip()
+
+    return None
+
+
+def _is_submit_confirmed(driver, text_area, baseline_text: str = "") -> bool:
+    """Treat submit as successful only when draft text is cleared."""
+    current_draft = _read_message_draft(driver, text_area)
+    if current_draft is None:
+        return False
+
+    if not current_draft.strip():
         return True
+
+    baseline_norm = _normalize_message_text(baseline_text)
+    current_norm = _normalize_message_text(current_draft)
+    return bool(baseline_norm) and current_norm != baseline_norm
+
+
+def _click_send_button(driver) -> bool:
+    send_btn_xpaths = [
+        "//div[@role='button'][.//span[normalize-space()='Send']]",
+        "//button[normalize-space()='Send']",
+        "//*[@aria-label='Send' and (@role='button' or self::button)]",
+        "//div[@role='button' and normalize-space()='Send']",
+    ]
+
+    for xpath in send_btn_xpaths:
+        try:
+            button = WebDriverWait(driver, 2).until(
+                EC.element_to_be_clickable((By.XPATH, xpath))
+            )
+            driver.execute_script("arguments[0].click();", button)
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _send_message(driver, text_area, expected_message: str = "") -> bool:
+    """Submit message and only report success once submit is confirmed."""
+    try:
+        baseline_text = str(expected_message or _read_message_draft(driver, text_area) or "").strip()
+
+        for attempt in range(2):
+            # Ensure focus before sending Enter.
+            try:
+                text_area.click()
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].focus();", text_area)
+                except Exception:
+                    pass
+
+            human_delay(0.4, 0.9)
+
+            submitted = False
+            for key in (Keys.ENTER, Keys.RETURN):
+                try:
+                    text_area.send_keys(key)
+                    submitted = True
+                    break
+                except Exception:
+                    continue
+
+            if not submitted:
+                try:
+                    active = driver.switch_to.active_element
+                    active.send_keys(Keys.ENTER)
+                    submitted = True
+                except Exception:
+                    submitted = False
+
+            if submitted:
+                human_delay(1.0, 1.8)
+                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
+                    return True
+
+            # Enter can fail silently in some sessions; try explicit Send button.
+            if _click_send_button(driver):
+                human_delay(1.0, 1.8)
+                if _is_submit_confirmed(driver, text_area, baseline_text=baseline_text):
+                    return True
+
+            logger.warning(f"[DM] Submit attempt {attempt + 1} not confirmed")
+
+        return False
 
     except Exception as e:
         logger.warning(f"[DM] Error in _send_message: {e}")
