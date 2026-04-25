@@ -1073,6 +1073,9 @@ def run_bot(
                 continue
 
             try:
+                # Force initial human-like break for session warm-up (likes/comments on home feed)
+                _do_human_like_break(driver, username, stop_event=stop_event)
+
                 # ── Interleaved Engagement Schedule ──
                 if (comment_liking_mode or target_engagement_mode) and engagement_schedule:
                     for step_index, action in enumerate(engagement_schedule):
@@ -1756,6 +1759,11 @@ def _process_model(
 
     # Step 1: Get recent posts
     posts = get_recent_posts(driver, model_username)
+    
+    # Warm up by interacting with model posts before Dming followers
+    if posts:
+        _engage_with_model_posts(driver, account, model_username, posts[:3], stop_event=stop_event)
+
     if not posts:
         if _is_page_unavailable(driver):
             log_and_telegram(f"[{username}] ⚠️ Profile @{model_username} is unavailable (deleted/broken). Skipping.")
@@ -2559,6 +2567,65 @@ def _extract_post_owner_username(post_element) -> str:
         return str(owner_link.text or "").strip().lstrip("@")
     except Exception:
         return ""
+
+
+def _engage_with_model_posts(driver, account, model_username, posts, stop_event=None):
+    """Like and/or comment on 1-2 posts of the target model to appear human."""
+    username = account["username"]
+    if not posts:
+        return
+        
+    log_and_telegram(f"[{username}] 🎨 Warm-up: Checking @{model_username} posts...")
+    
+    interact_count = random.randint(1, 2)
+    processed = 0
+    
+    for post in posts:
+        if stop_event and stop_event.is_set():
+            break
+        if processed >= interact_count:
+            break
+            
+        post_url = post.get("url")
+        if not post_url:
+            continue
+            
+        driver.get(post_url)
+        human_delay(3, 6)
+        
+        # Check for unavailability
+        if _is_page_unavailable(driver):
+            continue
+
+        # Decisions for actions
+        do_like = random.random() < 0.8
+        do_comment = random.random() < 0.4
+        
+        if not do_like and not do_comment:
+            # Just "read" it
+            human_delay(4, 8)
+        
+        # Like the post
+        if do_like:
+            if _like_home_feed_post(driver, driver):
+                telegram_bot.stats["likes_sent"] += 1
+                database.log_engagement(username, model_username, 'like')
+                log_and_telegram(f"[{username}] ❤️ Liked @{model_username} post")
+                human_delay(2, 4)
+                
+        # Comment on the post
+        if do_comment:
+            comment_pool = database.get_comments()
+            if comment_pool:
+                comment_text = random.choice(comment_pool)
+                if _comment_on_home_feed_post(driver, driver, comment_text, open_comment_section=False):
+                    telegram_bot.stats["comments_sent"] += 1
+                    database.log_engagement(username, model_username, 'comment')
+                    log_and_telegram(f"[{username}] 💬 Commented on @{model_username} post")
+                    human_delay(2, 4)
+        
+        processed += 1
+        human_delay(3, 7)
 
 
 def _do_human_like_break(driver, username, stop_event=None):
