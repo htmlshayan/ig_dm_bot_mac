@@ -382,8 +382,115 @@ def _dispatch_enter_key(driver, text_area) -> bool:
         return False
 
 
-def _click_send_button(driver) -> bool:
+def _force_click_element(driver, element) -> bool:
+    if element is None:
+        return False
+
+    try:
+        element.click()
+        return True
+    except Exception:
+        pass
+
+    try:
+        driver.execute_script(
+            """
+            const el = arguments[0];
+            if (!el) return;
+            el.scrollIntoView({block: 'center', inline: 'center'});
+            const events = ['mouseenter', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
+            for (const name of events) {
+                el.dispatchEvent(new MouseEvent(name, {view: window, bubbles: true, cancelable: true}));
+            }
+            el.click();
+            """,
+            element,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _click_send_button(driver, text_area=None) -> bool:
+    if text_area is not None:
+        try:
+            clicked = bool(
+                driver.execute_script(
+                    """
+                    const input = arguments[0];
+                    if (!input) return false;
+
+                    const isUsable = (el) => {
+                        if (!el) return false;
+                        const style = window.getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        if (!style) return false;
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') return false;
+                        if (rect.width < 2 || rect.height < 2) return false;
+                        if (el.disabled) return false;
+                        return true;
+                    };
+
+                    const forceClick = (el) => {
+                        const btn = el.closest("button, [role='button']") || el;
+                        if (!isUsable(btn)) return false;
+                        btn.scrollIntoView({block: 'center', inline: 'center'});
+                        const events = ['mouseenter', 'mouseover', 'mousemove', 'mousedown', 'mouseup', 'click'];
+                        for (const name of events) {
+                            btn.dispatchEvent(new MouseEvent(name, {view: window, bubbles: true, cancelable: true}));
+                        }
+                        btn.click();
+                        return true;
+                    };
+
+                    const selectors = [
+                        "div[role='button'][aria-label='Send'][tabindex]",
+                        "div[role='button'][aria-label='Send']",
+                        "button[aria-label='Send']",
+                        "button[aria-label='Send message']",
+                        "div[role='button'] svg[aria-label='Send']",
+                        "div[role='button'] title"
+                    ];
+
+                    const roots = [];
+                    let node = input;
+                    for (let i = 0; node && i < 10; i += 1) {
+                        roots.push(node);
+                        node = node.parentElement;
+                    }
+                    const dialog = input.closest("[role='dialog']");
+                    if (dialog) roots.push(dialog);
+                    roots.push(document);
+
+                    for (const root of roots) {
+                        if (!root || !root.querySelectorAll) continue;
+                        for (const selector of selectors) {
+                            const nodes = root.querySelectorAll(selector);
+                            for (const candidate of nodes) {
+                                if (selector.includes('title')) {
+                                    const titleText = String(candidate.textContent || '').trim().toLowerCase();
+                                    if (titleText !== 'send') continue;
+                                }
+                                if (forceClick(candidate)) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    return false;
+                    """,
+                    text_area,
+                )
+            )
+            if clicked:
+                return True
+        except Exception:
+            pass
+
     send_btn_xpaths = [
+        "//div[@role='button' and @aria-label='Send']",
+        "//div[@role='button' and @aria-label='Send message']",
         "//div[@role='button'][.//span[normalize-space()='Send']]",
         "//button[normalize-space()='Send']",
         "//*[@aria-label='Send' and (@role='button' or self::button)]",
@@ -398,8 +505,8 @@ def _click_send_button(driver) -> bool:
             button = WebDriverWait(driver, 2).until(
                 EC.element_to_be_clickable((By.XPATH, xpath))
             )
-            driver.execute_script("arguments[0].click();", button)
-            return True
+            if _force_click_element(driver, button):
+                return True
         except Exception:
             continue
 
@@ -426,8 +533,8 @@ def _click_send_button(driver) -> bool:
             """
         )
         if button is not None:
-            driver.execute_script("arguments[0].click();", button)
-            return True
+            if _force_click_element(driver, button):
+                return True
     except Exception:
         pass
 
@@ -453,7 +560,7 @@ def _send_message(driver, text_area, expected_message: str = "") -> bool:
                     return True
 
             # Enter can fail silently in some sessions; try explicit Send button.
-            if _click_send_button(driver):
+            if _click_send_button(driver, text_area=message_input):
                 human_delay(1.0, 1.8)
                 if _is_submit_confirmed(driver, message_input, baseline_text=baseline_text):
                     return True
