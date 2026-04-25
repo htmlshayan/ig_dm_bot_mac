@@ -42,8 +42,6 @@ class TelegramBot:
             "accounts_used": 0,
             "models_processed": 0,
             "dms_sent": 0,
-            "likes_sent": 0,
-            "comments_sent": 0,
             "dms_failed": 0,
             "current_account": "—",
             "current_model": "—",
@@ -191,23 +189,6 @@ class TelegramBot:
             "Use `/stop` to request stop"
         )
 
-    def send_engagement_startup(self, is_heavy: bool = False):
-        """Send Like-Comment bot startup notification."""
-        self.start_time = time.time()
-        
-        header = "COMMENT/LIKE BOT STARTED"
-        if is_heavy:
-            description = "Targeting: Continuous Home Feed"
-        else:
-            description = "Randomizing: Home Feed + Target Models"
-
-        self.send(
-            f"🚀 *{header}*\n\n"
-            f"⏰ Time: {datetime.now().strftime('%H:%M:%S')}\n"
-            f"{description}\n"
-            "Use `/status` for current state\n"
-            "Use `/stop` to request stop"
-        )
 
     def send_account_pool_summary(self, summary_text: str):
         """Send an IG account availability summary grouped by model label."""
@@ -419,14 +400,6 @@ class TelegramBot:
             f"{account_section}"
         )
 
-    def send_engagement_complete(self, total_interactions: int, accounts_done: int):
-        """Notify that the entire like-comment session is done."""
-        self.send(
-            f"🏁 *LIKE-COMMENT SESSION COMPLETE*\n\n"
-            f"❤️ Total Interactions: {total_interactions}\n"
-            f"👤 Accounts Processed: {accounts_done}\n"
-            f"⏰ Started : {self._started_ago()}"
-        )
 
     def send_24h_dm_summary(self, summary: dict):
         """Send last-24h DM totals with per-account breakdown."""

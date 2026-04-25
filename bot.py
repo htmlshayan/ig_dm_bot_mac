@@ -46,13 +46,8 @@ CLUSTER_NOTIFICATION_COOLDOWN_SEC = 24 * 60 * 60
 CLUSTER_NOTIFICATION_FALLBACK_BUCKET_SEC = 10 * 60
 INBOX_REPLIER_ENABLED_SETTING_KEY = "INBOX_REPLIER_ENABLED"
 DM_BATCH_PAUSE_ENABLED_SETTING_KEY = "DM_BATCH_PAUSE_ENABLED"
-DM_OTHER_ENGAGEMENT_ENABLED_SETTING_KEY = "DM_OTHER_ENGAGEMENT_ENABLED"
 DM_BATCH_SIZE = 10
 DM_BATCH_COOLDOWN_SECONDS = 5 * 60
-HEAVY_COMMENT_LIKING_MIN_POSTS = 180
-HEAVY_COMMENT_LIKING_MAX_POSTS = 200
-COMMENT_LIKE_ACTION_DELAY_MIN_SECONDS = 2.0
-COMMENT_LIKE_ACTION_DELAY_MAX_SECONDS = 5.0
 
 
 def _setting_int(key: str) -> int:
@@ -89,12 +84,6 @@ def _setting_bool(key: str, default: bool = False) -> bool:
     if text in ("0", "false", "off", "no", "disable", "disabled", "", "none", "null"):
         return False
     return bool(default)
-
-
-def _is_dm_other_engagement_enabled() -> bool:
-    """Return True when optional engagement actions are enabled during DM runtime."""
-    return _setting_bool(DM_OTHER_ENGAGEMENT_ENABLED_SETTING_KEY, default=False)
-
 
 def _setting_int_default(key: str, default: int) -> int:
     """Read an integer setting with a hard fallback when parsing fails."""
@@ -148,60 +137,8 @@ def _interruptible_sleep(seconds: float, stop_event=None, tick: float = 0.5) -> 
     return False
 
 
-def _sleep_after_comment_like_action(stop_event=None) -> bool:
-    """Pause after successful like/comment actions for human-like pacing."""
-    return _interruptible_sleep(
-        random.uniform(COMMENT_LIKE_ACTION_DELAY_MIN_SECONDS, COMMENT_LIKE_ACTION_DELAY_MAX_SECONDS),
-        stop_event=stop_event,
-    )
 
 
-def _submit_comment_with_enter(driver, comment_input, expected_message: str = "") -> bool:
-    """Submit a typed comment by pressing Enter and verify submit best-effort."""
-    attempts = 3
-    for _ in range(attempts):
-        submitted = False
-        try:
-            comment_input.send_keys(Keys.ENTER)
-            submitted = True
-        except Exception:
-            try:
-                active_element = driver.switch_to.active_element
-                active_element.send_keys(Keys.ENTER)
-                submitted = True
-            except Exception:
-                pass
-
-        # Some composers only react to RETURN; retry with RETURN before giving up.
-        if not submitted:
-            try:
-                comment_input.send_keys(Keys.RETURN)
-                submitted = True
-            except Exception:
-                try:
-                    active_element = driver.switch_to.active_element
-                    active_element.send_keys(Keys.RETURN)
-                    submitted = True
-                except Exception:
-                    return False
-
-        human_delay(0.7, 1.1)
-
-        # If textbox is cleared or detached after submit, treat as submitted.
-        try:
-            remaining_text = str(comment_input.get_attribute("value") or "").strip()
-            if not remaining_text:
-                remaining_text = str(comment_input.get_attribute("textContent") or "").strip()
-        except Exception:
-            return True
-
-        if not remaining_text:
-            return True
-
-        if expected_message and remaining_text.lower() != expected_message.strip().lower():
-            return True
-
-    return False
 
 
 def _maybe_wait_for_dm_batch_cooldown(sender: str, dm_batch_state: dict, stop_event=None):
@@ -714,18 +651,7 @@ def run_bot(
     distributed_session_id = uuid4().hex
 
     normalized_runtime_mode = str(runtime_mode or "dm").strip().lower()
-    if normalized_runtime_mode not in ("dm", "comment_liking", "heavy_comment_liking", "target_engagement"):
-        normalized_runtime_mode = "dm"
-    comment_liking_mode = normalized_runtime_mode == "comment_liking"
-    heavy_comment_liking_mode = normalized_runtime_mode == "heavy_comment_liking"
-    target_engagement_mode = normalized_runtime_mode == "target_engagement"
-
-    if heavy_comment_liking_mode:
-        runtime_title = "INSTAGRAM HEAVY COMMENT-LIKING BOT"
-    elif target_engagement_mode or comment_liking_mode:
-        runtime_title = "INSTAGRAM LIKE-COMMENT BOT"
-    else:
-        runtime_title = "INSTAGRAM MODEL DM BOT"
+    runtime_title = "INSTAGRAM MODEL DM BOT"
 
     logger.info("=" * 60)
     logger.info(f"  {runtime_title} — STARTING")
@@ -796,12 +722,12 @@ def run_bot(
         if coordinator:
             coordinator.shutdown()
         return
-    if (not comment_liking_mode and not heavy_comment_liking_mode) and (not models):
+    if not models:
         logger.error("No automation-enabled models configured in database")
         if coordinator:
             coordinator.shutdown()
         return
-    if (not comment_liking_mode and not heavy_comment_liking_mode) and (not messages and not model_message_map):
+    if not messages and not model_message_map:
         logger.error("No messages configured (general or model-specific)")
         if coordinator:
             coordinator.shutdown()
@@ -874,16 +800,7 @@ def run_bot(
     else:
         logger.info("Global target dedupe disabled (each VPS/account chases its own DM quota)")
 
-    if heavy_comment_liking_mode:
-        logger.info("Runtime mode active: heavy comment-liking (180-200 posts per account, DM/inbox skipped)")
-    elif target_engagement_mode or comment_liking_mode:
-        logger.info("Runtime mode active: randomized like-comment (home feed + target models)")
-    else:
-        logger.info("Runtime mode active: standard model DM flow")
-        logger.info(
-            "DM optional engagement actions: %s",
-            "enabled" if _is_dm_other_engagement_enabled() else "disabled",
-        )
+    logger.info("Runtime mode active: standard model DM flow")
 
     # Start Telegram
     telegram_bot.start_polling()
@@ -892,12 +809,9 @@ def run_bot(
         expected_state="running",
     )
     if should_send_startup_bundle:
-        if target_engagement_mode or comment_liking_mode or heavy_comment_liking_mode:
-            telegram_bot.send_engagement_startup(is_heavy=heavy_comment_liking_mode)
-        else:
-            telegram_bot.send_startup()
-            telegram_bot.send_account_pool_summary(_build_account_pool_summary(accounts, models))
-            telegram_bot.send_account_profile_summary(accounts, limit=3, recent_only=True)
+        telegram_bot.send_startup()
+        telegram_bot.send_account_pool_summary(_build_account_pool_summary(accounts, models))
+        telegram_bot.send_account_profile_summary(accounts, limit=3, recent_only=True)
     else:
         logger.info("Skipping duplicate cluster startup Telegram notifications on this VPS")
     if disabled_accounts:
@@ -997,16 +911,6 @@ def run_bot(
             engagement_schedule = []
             if heavy_comment_liking_mode:
                 account_models = ["home_feed"]
-            elif comment_liking_mode or target_engagement_mode:
-                # Interleaved Engagement Mode
-                # Build a human-like schedule that alternates between
-                # model visits, home feed sessions, and idle browsing
-                engagement_schedule = _build_engagement_schedule(account_models)
-                account_models = []  # Clear — we use the schedule instead
-                log_and_telegram(
-                    f"[{username}] 🔀 Engagement schedule: {len(engagement_schedule)} actions "
-                    f"(models + feed + idle)"
-                )
                 
             account_custom_messages = _normalize_message_list(account.get("custom_messages"))
             account_label_display = label_display
@@ -1100,210 +1004,71 @@ def run_bot(
                     coordinator.release_account_lock(username)
                 continue
 
+
             try:
-                # Optional warm-up engagement in DM runtime.
-                if normalized_runtime_mode == "dm" and _is_dm_other_engagement_enabled():
-                    _do_human_like_break(driver, username, stop_event=stop_event)
+                # ── Sequential Model Loop (DM mode) ──
+                for model_username in account_models:
+                    _maybe_send_24h_dm_summary(hours=DM_SUMMARY_WINDOW_HOURS)
 
-                # ── Interleaved Engagement Schedule ──
-                if (comment_liking_mode or target_engagement_mode) and engagement_schedule:
-                    for step_index, action in enumerate(engagement_schedule):
-                        _maybe_send_24h_dm_summary(hours=DM_SUMMARY_WINDOW_HOURS)
+                    if stop_event and stop_event.is_set():
+                        log_and_telegram("🛑 Stop requested, breaking model loop.")
+                        break
 
-                        if stop_event and stop_event.is_set():
-                            log_and_telegram("🛑 Stop requested, breaking engagement loop.")
-                            break
+                    if coordinator and coordinator.enabled and not coordinator.has_account_lock(username):
+                        log_and_telegram(f"[{username}] ⚠️ Distributed lock lost, stopping account session")
+                        break
 
-                        if coordinator and coordinator.enabled and not coordinator.has_account_lock(username):
-                            log_and_telegram(f"[{username}] ⚠️ Distributed lock lost, stopping account session")
-                            break
+                    if not telegram_bot._polling:
+                        log_and_telegram("🛑 Stop requested, finishing up...")
+                        break
 
-                        if not telegram_bot._polling:
-                            log_and_telegram("🛑 Stop requested, finishing up...")
-                            break
+                    log_and_telegram(f"🎯 Targeting model: @{model_username}")
+                    telegram_bot.stats["current_model"] = model_username
 
-                        action_type = action[0]
-                        action_value = action[1] if len(action) > 1 else None
+                    model_key = _normalize_model_key(model_username) or str(model_username or "").strip().lower()
 
-                        if action_type == "model" and action_value:
-                            model_username = str(action_value)
-                            mini_cap = random.randint(3, 5)
-                            log_and_telegram(
-                                f"[{username}] 🎯 Model visit: @{model_username} "
-                                f"(mini-session, up to {mini_cap} users)"
-                            )
-                            telegram_bot.stats["current_model"] = model_username
-
-                            _process_target_engagement(
-                                driver,
-                                account,
-                                model_username,
-                                stop_event=stop_event,
-                                coordinator=coordinator,
-                                already_engaged=already_dmd,
-                                max_users_override=mini_cap,
-                            )
-
-                            model_key = _normalize_model_key(model_username)
-                            if model_key:
-                                completed_model_keys.add(model_key)
-                            telegram_bot.stats["models_processed"] = len(completed_model_keys)
-
-                        elif action_type == "home_feed":
-                            post_count = int(action_value) if action_value else random.randint(3, 8)
-                            log_and_telegram(
-                                f"[{username}] 🏠 Home feed session ({post_count} posts)"
-                            )
-                            telegram_bot.stats["current_model"] = "home_feed"
-
-                            _process_comment_liking_model(
-                                driver,
-                                account,
-                                "home_feed",
-                                already_dmd,
-                                stop_event=stop_event,
-                                max_posts=post_count,
-                            )
-
-                        elif action_type == "idle":
-                            telegram_bot.stats["current_model"] = "browsing"
-                            _idle_browse_home_feed(driver, username, stop_event=stop_event)
-
-                        # Check for challenges after each action
-                        if _check_for_challenges_and_alert(driver, username, context="during engagement"):
-                            break
-
-                        # Check if still logged in
-                        if not is_logged_in(driver):
-                            log_and_telegram(f"⚠️ Lost login for @{username} during engagement")
-                            break
-
-                        # Human-like pause between actions (15-45s)
-                        pause = random.uniform(15, 45)
-                        log_and_telegram(f"[{username}] ⏳ Pausing {pause:.0f}s before next action...")
-                        if _interruptible_sleep(pause, stop_event=stop_event):
-                            break
-
-                # ── Sequential Model Loop (DM mode + heavy comment-liking) ──
-                else:
-                    for model_username in account_models:
-                        _maybe_send_24h_dm_summary(hours=DM_SUMMARY_WINDOW_HOURS)
-
-                        if stop_event and stop_event.is_set():
-                            log_and_telegram("🛑 Stop requested, breaking model loop.")
-                            break
-
-                        if coordinator and coordinator.enabled and not coordinator.has_account_lock(username):
-                            log_and_telegram(f"[{username}] ⚠️ Distributed lock lost, stopping account session")
-                            break
-
-                        if not telegram_bot._polling:
-                            log_and_telegram("🛑 Stop requested, finishing up...")
-                            break
-
-                        if heavy_comment_liking_mode:
-                            log_and_telegram(f"🏠 Heavy comment-liking for @{username}")
-                            telegram_bot.stats["current_model"] = "heavy_feed"
-                        elif model_username == "home_feed":
-                            log_and_telegram(f"🏠 Targeting home feed actions for @{username}")
-                            telegram_bot.stats["current_model"] = "home_feed"
-                        else:
-                            log_and_telegram(f"🎯 Targeting model: @{model_username}")
-                            telegram_bot.stats["current_model"] = model_username
-
-                        model_key = _normalize_model_key(model_username) or str(model_username or "").strip().lower()
-
-                        if heavy_comment_liking_mode:
-                            _process_heavy_comment_liking(
-                                driver,
-                                account,
-                                stop_event=stop_event,
-                            )
-                        elif model_username == "home_feed":
-                            _process_comment_liking_model(
-                                driver,
-                                account,
-                                model_username,
-                                already_dmd,
-                                stop_event=stop_event,
-                            )
-                        elif target_engagement_mode or comment_liking_mode:
-                            _process_target_engagement(
-                                driver,
-                                account,
-                                model_username,
-                                stop_event=stop_event,
-                                coordinator=coordinator,
-                                already_engaged=already_dmd,
-                            )
-
-                        if heavy_comment_liking_mode or target_engagement_mode or comment_liking_mode:
-                            if model_key:
-                                completed_model_keys.add(model_key)
-                            telegram_bot.stats["models_processed"] = len(completed_model_keys)
-                    else:
-                        # Default DM/Model flow
-                        custom_messages = model_message_map.get(_normalize_model_key(model_username), [])
-                        if account_model_key and account_custom_messages:
-                            messages_for_model = account_custom_messages
-                            log_and_telegram(
-                                f"[{username}] Using {len(messages_for_model)} account custom messages for @{model_username}"
-                            )
-                        elif account_model_key:
-                            # Labeled accounts without per-account custom messages should run with
-                            # the same generic target message flow as normal accounts.
-                            messages_for_model = custom_messages if custom_messages else messages
-                            if not messages_for_model:
-                                log_and_telegram(
-                                    f"[{username}] ⚠️ No generic messages configured for @{model_username}, skipping"
-                                )
-                                continue
-
-                            if custom_messages:
-                                log_and_telegram(
-                                    f"[{username}] No account custom messages for label {account_label_display}; using target message set for @{model_username}"
-                                )
-                            else:
-                                log_and_telegram(
-                                    f"[{username}] No account custom messages for label {account_label_display}; using general message pool for @{model_username}"
-                                )
-                        else:
-                            messages_for_model = custom_messages if custom_messages else messages
-                            if not messages_for_model:
-                                log_and_telegram(f"[{username}] ⚠️ No messages configured for @{model_username}, skipping")
-                                continue
-
-                            if custom_messages:
-                                log_and_telegram(
-                                    f"[{username}] Using {len(messages_for_model)} custom messages for @{model_username}"
-                                )
-                            else:
-                                log_and_telegram(
-                                    f"[{username}] Using general message pool for @{model_username}"
-                                )
-
-                        dms_for_model = _process_model(
-                            driver,
-                            account,
-                            model_username,
-                            messages_for_model,
-                            dm_log,
-                            already_dmd,
-                            dm_batch_state=account_dm_batch_state,
-                            stop_event=stop_event,
-                            coordinator=coordinator,
-                            use_global_target_dedupe=use_global_target_dedupe,
+                    # Default DM/Model flow
+                    custom_messages = model_message_map.get(_normalize_model_key(model_username), [])
+                    if account_model_key and account_custom_messages:
+                        messages_for_model = account_custom_messages
+                        log_and_telegram(
+                            f"[{username}] Using {len(messages_for_model)} account custom messages for @{model_username}"
                         )
+                    elif account_model_key:
+                        messages_for_model = custom_messages if custom_messages else messages
+                        if not messages_for_model:
+                            log_and_telegram(
+                                f"[{username}] ⚠️ No generic messages configured for @{model_username}, skipping"
+                            )
+                            continue
+                    else:
+                        messages_for_model = custom_messages if custom_messages else messages
+                        if not messages_for_model:
+                            log_and_telegram(f"[{username}] ⚠️ No messages configured for @{model_username}, skipping")
+                            continue
 
-                        total_dms_sent += dms_for_model
-                        telegram_bot.stats["dms_sent"] = total_dms_sent
+                    dms_for_model = _process_model(
+                        driver,
+                        account,
+                        model_username,
+                        messages_for_model,
+                        dm_log,
+                        already_dmd,
+                        dm_batch_state=account_dm_batch_state,
+                        stop_event=stop_event,
+                        coordinator=coordinator,
+                        use_global_target_dedupe=use_global_target_dedupe,
+                    )
 
-                        if dms_for_model > 0:
-                            session_account_dm_counts[username] = int(session_account_dm_counts.get(username, 0)) + int(dms_for_model)
-                            if model_key:
-                                completed_model_keys.add(model_key)
-                            telegram_bot.stats["models_processed"] = len(completed_model_keys)
-                            telegram_bot.send_model_complete(model_username, dms_for_model, sender_account=username)
+                    total_dms_sent += dms_for_model
+                    telegram_bot.stats["dms_sent"] = total_dms_sent
+
+                    if dms_for_model > 0:
+                        session_account_dm_counts[username] = int(session_account_dm_counts.get(username, 0)) + int(dms_for_model)
+                        if model_key:
+                            completed_model_keys.add(model_key)
+                        telegram_bot.stats["models_processed"] = len(completed_model_keys)
+                        telegram_bot.send_model_complete(model_username, dms_for_model, sender_account=username)
 
                     # Check if still logged in
                     if not is_logged_in(driver):
@@ -1322,9 +1087,7 @@ def run_bot(
                         break
 
                 if not (stop_event and stop_event.is_set()):
-                    if comment_liking_mode or heavy_comment_liking_mode:
-                        log_and_telegram(f"[{username}] 💬 Comment liking mode: inbox/reply cycle skipped.")
-                    elif is_logged_in(driver):
+                    if is_logged_in(driver):
                         queued_replies_ready = has_queued_reply_for_account(username)
                         unread_result = _auto_sync_unread_inbox_for_account(
                             driver,
@@ -1415,22 +1178,11 @@ def run_bot(
                 should_send_session_complete = should_send_stop_notice
 
         if should_send_session_complete:
-            if target_engagement_mode or comment_liking_mode:
-                telegram_bot.send_engagement_complete(
-                    total_interactions=total_dms_sent,
-                    accounts_done=len(session_account_dm_counts)
-                )
-            elif comment_liking_mode or heavy_comment_liking_mode:
-                telegram_bot.send(
-                    f"✅ *COMMENT LIKING PASS COMPLETE*\n\n"
-                    f"Models processed: {len(completed_model_keys)}"
-                )
-            else:
-                telegram_bot.send_session_complete(
-                    total_dms_sent,
-                    len(completed_model_keys),
-                    by_account=session_account_dm_counts,
-                )
+            telegram_bot.send_session_complete(
+                total_dms_sent,
+                len(completed_model_keys),
+                by_account=session_account_dm_counts,
+            )
         elif stop_event and stop_event.is_set() and not continuous_mode:
             logger.info("Skipping duplicate cluster stop Telegram notification on this VPS")
 
@@ -1440,10 +1192,7 @@ def run_bot(
 
     logger.info("=" * 60)
     completion_label = "PASS COMPLETE" if continuous_mode else "SESSION COMPLETE"
-    if comment_liking_mode or heavy_comment_liking_mode:
-        logger.info(f"  {completion_label} — {len(completed_model_keys)} unique models processed")
-    else:
-        logger.info(f"  {completion_label} — {total_dms_sent} DMs sent, {len(completed_model_keys)} unique models done")
+    logger.info(f"  {completion_label} — {total_dms_sent} DMs sent, {len(completed_model_keys)} unique models done")
     logger.info("=" * 60)
 
 
@@ -1789,9 +1538,6 @@ def _process_model(
     # Step 1: Get recent posts
     posts = get_recent_posts(driver, model_username)
     
-    # Optional warm-up by interacting with model posts before DMing followers.
-    if posts and _is_dm_other_engagement_enabled():
-        _engage_with_model_posts(driver, account, model_username, posts[:3], stop_event=stop_event)
 
     if not posts:
         if _is_page_unavailable(driver):
@@ -2317,1051 +2063,6 @@ def _process_heavy_comment_liking(
     return processed_posts
 
 
-def _process_target_engagement(
-    driver,
-    account,
-    model_username,
-    stop_event=None,
-    coordinator=None,
-    already_engaged=None,
-    max_users_override: int = None,
-) -> int:
-    """
-    Engagement flow:
-    1. Scrape posts from model.
-    2. For each post:
-       a. Like the post itself.
-       b. Like comments on the post.
-       c. (Optional) Like latest posts of recent commenters.
-    """
-    username = account["username"]
-    db_max_users = _setting_int_default("TARGET_ENGAGEMENT_MAX_USERS_PER_MODEL", 20)
-    max_users = max_users_override if max_users_override and max_users_override > 0 else db_max_users
-    max_age_hours = float(_setting_int_default("TARGET_ENGAGEMENT_MAX_POST_AGE_HOURS", 4))
-    
-    engaged_count = 0
-    if already_engaged is None:
-        already_engaged = set()
-
-    log_and_telegram(f"[{username}] 🎯 Starting engagement for @{model_username} (max {max_users} interactions, < {max_age_hours}h)")
-
-    from core.scraper import get_recent_posts, get_recent_commenters
-    posts = get_recent_posts(driver, model_username)
-    
-    if not posts and _is_page_unavailable(driver):
-        log_and_telegram(f"[{username}] ⚠️ Profile @{model_username} is unavailable. Skipping engagement.")
-        return 0
-    
-    # Process each post
-    posts_processed = 0
-    for post in posts:
-        if stop_event and stop_event.is_set():
-            break
-        if engaged_count >= max_users:
-            break
-        if posts_processed >= 6:
-            log_and_telegram(f"[{username}] ✅ Reached limit of 6 posts for @{model_username}")
-            break
-
-        post_url = post["url"]
-        log_and_telegram(f"[{username}] 🔍 Engaging with post {posts_processed + 1}/6: {post_url[-15:]}")
-        
-        driver.get(post_url)
-        human_delay(3, 5)
-
-        # Define available actions for this post
-        actions = ["like_post", "comment_post", "like_comments"]
-        random.shuffle(actions)
-
-        for action in actions:
-            if stop_event and stop_event.is_set():
-                break
-            
-            if action == "like_post":
-                # 1. Like the post itself
-                if _like_home_feed_post(driver, driver):
-                    telegram_bot.stats["likes_sent"] += 1
-                    database.log_engagement(username, model_username, 'like')
-                    log_and_telegram(f"[{username}] ❤️ Liked model post")
-                    engaged_count += 1
-                    if _sleep_after_comment_like_action(stop_event=stop_event):
-                        break
-                else:
-                    human_delay(1, 2)
-
-            elif action == "comment_post":
-                # 2. Comment on the post itself (if pool exists)
-                comment_pool = database.get_comments()
-                # 80% chance to comment on the model post when visited
-                if comment_pool and random.random() < 0.8:
-                    comment_text = random.choice(comment_pool)
-                    if _comment_on_home_feed_post(driver, driver, comment_text, open_comment_section=False):
-                        telegram_bot.stats["comments_sent"] += 1
-                        database.log_engagement(username, model_username, 'comment')
-                        log_and_telegram(f"[{username}] 💬 Commented on model post")
-                        engaged_count += 1
-                        if _sleep_after_comment_like_action(stop_event=stop_event):
-                            break
-                else:
-                    human_delay(1, 2)
-
-            elif action == "like_comments":
-                # 3. Like comments on the post (10-15 likes as requested)
-                target_likes = random.randint(10, 15)
-                comment_likes = _like_comments_on_current_post(driver, stop_event=stop_event, max_likes=target_likes)
-                engaged_count += comment_likes
-                log_and_telegram(f"[{username}] ❤️ Liked {comment_likes}/{target_likes} comments on post")
-                if _sleep_after_comment_like_action(stop_event=stop_event):
-                    break
-
-        posts_processed += 1
-        
-        if engaged_count >= max_users:
-            break
-
-        # 3. (Legacy) Like latest posts of recent commenters
-        # Only do this if we still have quota and it's enabled
-        if engaged_count < max_users:
-            recent_commenters = get_recent_commenters(driver, post_url, max_age_hours, model_username)
-            
-            for target_user in recent_commenters:
-                if stop_event and stop_event.is_set():
-                    break
-                if engaged_count >= max_users:
-                    break
-                
-                if target_user in already_engaged:
-                    continue
-
-                # Check global dedupe if coordinator exists
-                if coordinator and coordinator.enabled:
-                    if coordinator.is_target_dmd(target_user): # Reuse DM dedupe logic
-                        already_engaged.add(target_user)
-                        continue
-
-                log_and_telegram(f"[{username}] 👤 Engaging with @{target_user}...")
-                
-                success = _like_user_latest_post(driver, target_user)
-                
-                # Check for suspension/challenges immediately after action
-                if _check_for_challenges_and_alert(driver, username, context="during target engagement"):
-                    return engaged_count
-
-                if success:
-                    engaged_count += 1
-                    already_engaged.add(target_user)
-                    telegram_bot.stats["likes_sent"] += 1
-                    # Log to DB to prevent repeat engagement (reuse DM log for simplicity or add new)
-                    database.log_dm(target_user) 
-                    database.log_engagement(username, target_user, 'like')
-                    log_and_telegram(f"[{username}] ❤️ Liked latest post for @{target_user} ({engaged_count}/{max_users})")
-                
-                human_delay(5, 10)
-
-    log_and_telegram(f"[{username}] ✅ Engagement complete for @{model_username}: {engaged_count} users engaged")
-    return engaged_count
-
-
-def _like_user_latest_post(driver, target_username) -> bool:
-    """Navigate to user profile and like their first visible post."""
-    profile_url = f"{INSTAGRAM_BASE_URL}/{target_username}/"
-    driver.get(profile_url)
-    human_delay(3, 5)
-
-    try:
-        # Check if page is unavailable
-        if _is_page_unavailable(driver):
-            logger.info(f"[Bot] @{target_username} profile is unavailable, skipping")
-            return False
-
-        # Check if private
-        page_source = driver.page_source.lower()
-        if "this account is private" in page_source:
-            logger.info(f"[Bot] @{target_username} is private, skipping")
-            return False
-            
-        # Find first visible post/reel link.
-        post_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/p/') or contains(@href, '/reel/')]")
-        first_post = None
-        for link in post_links:
-            try:
-                if link.is_displayed():
-                    first_post = link
-                    break
-            except Exception:
-                continue
-
-        if first_post is None and post_links:
-            first_post = post_links[0]
-
-        if first_post is None:
-            logger.warning(f"[Bot] Could not find any post for @{target_username}")
-            return False
-
-        if not _safe_click(driver, first_post):
-            logger.warning(f"[Bot] Could not open latest post for @{target_username}")
-            return False
-
-        human_delay(3, 5)
-
-        if _like_home_feed_post(driver, driver):
-            human_delay(1, 2)
-            return True
-
-        logger.warning(f"[Bot] Could not find Like button for @{target_username}")
-        return False
-
-    except Exception as e:
-        logger.error(f"[Bot] Error liking post for @{target_username}: {e}")
-        return False
-
-
-def _heavy_click_comment_button(driver, post_element):
-    """Open the post popup by clicking the Comment icon on a feed post."""
-    return _open_comment_popup_from_feed(driver, post_element)
-
-
-def _heavy_type_and_post_comment(driver, post_element, comment_text: str) -> bool:
-    """Type a comment in the open popup and submit with Enter."""
-    return _comment_on_home_feed_post(
-        driver,
-        post_element,
-        comment_text,
-        open_comment_section=False,
-    )
-
-
-def _heavy_click_close_popup(driver):
-    """Click the Close button (SVG with aria-label='Close') on any open popup/modal."""
-    close_xpaths = [
-        "//*[local-name()='svg' and @aria-label='Close']/ancestor::*[@role='button'][1]",
-        "//*[local-name()='svg' and @aria-label='Close']/..",
-        "//div[@role='dialog']//*[local-name()='svg' and @aria-label='Close']/ancestor::*[@role='button'][1]",
-    ]
-    for xpath in close_xpaths:
-        try:
-            elements = driver.find_elements(By.XPATH, xpath)
-            for el in reversed(elements):
-                try:
-                    if el.is_displayed():
-                        _safe_click(driver, el)
-                        human_delay(0.3, 0.6)
-                        return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    # Fallback to ESC key
-    try:
-        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        human_delay(0.5, 1.0)
-        return True
-    except Exception:
-        pass
-
-    return False
-
-
-def _dismiss_home_feed_dialogs(driver):
-    """Dismiss common modal prompts that can block feed actions."""
-    candidate_xpaths = [
-        "//button[normalize-space()='Not Now']",
-        "//button[normalize-space()='Not now']",
-        "//button[normalize-space()='Cancel']",
-    ]
-
-    for xpath in candidate_xpaths:
-        try:
-            buttons = driver.find_elements(By.XPATH, xpath)
-            for button in buttons[:2]:
-                _safe_click(driver, button)
-                human_delay(0.2, 0.5)
-        except Exception:
-            continue
-
-
-def _like_comments_on_current_post(driver, stop_event=None, max_likes: int = 10) -> int:
-    """
-    Find and like comments on the currently loaded post.
-    """
-    likes_done = 0
-    
-    # 1. Try to load more comments first
-    for _ in range(2):
-        if stop_event and stop_event.is_set():
-            break
-        if not _click_load_more_comments(driver):
-            break
-        human_delay(1.5, 2.5)
-
-    # 2. Find Like buttons for comments
-    # Selectors based on user provided SVG (height=12) and container
-    comment_like_xpaths = [
-        "//ul[contains(@class, '_a9z6')]//div[@role='button'][.//*[local-name()='svg' and @aria-label='Like' and @height='12']]",
-        "//span[contains(@class, '_a9zu')]//div[@role='button'][.//*[local-name()='svg' and @aria-label='Like']]",
-        "//div[@role='button'][.//*[local-name()='svg' and @aria-label='Like' and @height='12']]",
-    ]
-
-    seen_buttons = set()
-    
-    for _ in range(5): # Up to 5 batches of liking
-        if (stop_event and stop_event.is_set()) or likes_done >= max_likes:
-            break
-            
-        found_buttons = []
-        for xpath in comment_like_xpaths:
-            try:
-                elements = driver.find_elements(By.XPATH, xpath)
-                for el in elements:
-                    if el not in seen_buttons:
-                        found_buttons.append(el)
-            except Exception:
-                continue
-        
-        if not found_buttons:
-            # Try loading more
-            if _click_load_more_comments(driver):
-                human_delay(1.5, 2.5)
-                continue
-            
-            # If still no buttons, try scrolling down to reveal more
-            try:
-                driver.execute_script("window.scrollBy(0, 500);")
-                human_delay(1.2, 2.0)
-                continue
-            except Exception:
-                break
-
-        random.shuffle(found_buttons)
-        
-        for btn in found_buttons:
-            if (stop_event and stop_event.is_set()) or likes_done >= max_likes:
-                break
-            
-            try:
-                # Scroll to button
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", btn)
-                human_delay(0.5, 1.0)
-                
-                # Check if already liked
-                try:
-                    svg = btn.find_element(By.TAG_NAME, "svg")
-                    label = svg.get_attribute("aria-label")
-                    if label == "Unlike":
-                        seen_buttons.add(btn)
-                        continue
-                except Exception:
-                    pass
-
-                if _safe_click(driver, btn):
-                    likes_done += 1
-                    seen_buttons.add(btn)
-                    telegram_bot.stats["likes_sent"] += 1
-                    if _sleep_after_comment_like_action(stop_event=stop_event):
-                        return likes_done
-            except Exception:
-                continue
-        
-        # Scroll down slightly after a batch
-        try:
-            driver.execute_script("window.scrollBy(0, 400);")
-            human_delay(1.5, 2.5)
-        except Exception:
-            pass
-
-    return likes_done
-
-
-def _click_load_more_comments(driver) -> bool:
-    """Click the 'Load more comments' button if visible."""
-    load_more_xpaths = [
-        "//button[contains(@class, '_abl-')][.//*[local-name()='svg' and @aria-label='Load more comments']]",
-        "//svg[@aria-label='Load more comments']/ancestor::button",
-        "//button[.//*[contains(text(), 'Load more comments')]]",
-    ]
-    
-    for xpath in load_more_xpaths:
-        try:
-            btn = driver.find_element(By.XPATH, xpath)
-            if btn.is_displayed():
-                if _safe_click(driver, btn):
-                    return True
-        except Exception:
-            continue
-    return False
-
-
-def _extract_home_feed_post_url(post_element) -> str:
-    """Extract canonical post/reel URL from a home feed article."""
-    try:
-        links = post_element.find_elements(By.XPATH, ".//a[contains(@href, '/p/') or contains(@href, '/reel/')]")
-    except Exception:
-        return ""
-
-    for link in links:
-        try:
-            href = str(link.get_attribute("href") or "").strip()
-        except Exception:
-            href = ""
-
-        if not href:
-            continue
-
-        return href.split("?")[0]
-
-    return ""
-
-
-def _extract_post_owner_username(post_element) -> str:
-    """Extract post owner username from a home feed article."""
-    try:
-        # Look for username link in header
-        owner_link = post_element.find_element(By.XPATH, ".//header//a[contains(@class, 'x1i10hfl')]")
-        return str(owner_link.text or "").strip().lstrip("@")
-    except Exception:
-        return ""
-
-
-def _engage_with_model_posts(driver, account, model_username, posts, stop_event=None):
-    """Like and/or comment on 1-2 posts of the target model to appear human."""
-    username = account["username"]
-    if not posts:
-        return
-        
-    log_and_telegram(f"[{username}] 🎨 Warm-up: Checking @{model_username} posts...")
-    
-    interact_count = random.randint(1, 2)
-    processed = 0
-    
-    for post in posts:
-        if stop_event and stop_event.is_set():
-            break
-        if processed >= interact_count:
-            break
-            
-        post_url = post.get("url")
-        if not post_url:
-            continue
-            
-        driver.get(post_url)
-        human_delay(3, 6)
-        
-        # Check for unavailability
-        if _is_page_unavailable(driver):
-            continue
-
-        # Decisions for actions
-        do_like = random.random() < 0.8
-        do_comment = random.random() < 0.4
-        
-        if not do_like and not do_comment:
-            # Just "read" it
-            human_delay(4, 8)
-        
-        # Like the post
-        if do_like:
-            if _like_home_feed_post(driver, driver):
-                telegram_bot.stats["likes_sent"] += 1
-                database.log_engagement(username, model_username, 'like')
-                log_and_telegram(f"[{username}] ❤️ Liked @{model_username} post")
-                human_delay(2, 4)
-                
-        # Comment on the post
-        if do_comment:
-            comment_pool = database.get_comments()
-            if comment_pool:
-                comment_text = random.choice(comment_pool)
-                if _comment_on_home_feed_post(driver, driver, comment_text, open_comment_section=False):
-                    telegram_bot.stats["comments_sent"] += 1
-                    database.log_engagement(username, model_username, 'comment')
-                    log_and_telegram(f"[{username}] 💬 Commented on @{model_username} post")
-                    human_delay(2, 4)
-        
-        processed += 1
-        human_delay(3, 7)
-
-
-def _do_human_like_break(driver, username, stop_event=None):
-    """
-    Perform a human-like break: Home feed interactions + Explore browsing.
-    """
-    log_and_telegram(f"[{username}] 🧘 Taking a human-like break (Home + Explore)...")
-    
-    # 1. Home Feed Activity
-    try:
-        driver.get(f"{INSTAGRAM_BASE_URL}/")
-        human_delay(3, 5)
-        _dismiss_home_feed_dialogs(driver)
-        
-        # Phase A: Idle scrolling (simulate reading/consuming content)
-        log_and_telegram(f"[{username}] 🏠 Reading home feed...")
-        for _ in range(random.randint(3, 6)):
-            if stop_event and stop_event.is_set():
-                break
-            _scroll_home_feed(driver)
-            human_delay(3, 8)
-            
-        if stop_event and stop_event.is_set():
-            return
-
-        # Phase B: Interactions (Liking/Commenting)
-        # Use a mini-session of 2-4 posts with randomized actions
-        break_target = random.randint(2, 4)
-        log_and_telegram(f"[{username}] ❤️ Engaging with {break_target} home feed posts...")
-        
-        _process_comment_liking_model(
-            driver, 
-            {"username": username}, 
-            "human_break", 
-            set(), 
-            stop_event=stop_event, 
-            max_posts=break_target
-        )
-    except Exception as e:
-        logger.debug(f"[{username}] Error during home break activity: {e}")
-
-    if stop_event and stop_event.is_set():
-        return
-
-    # 2. Explore Activity
-    try:
-        log_and_telegram(f"[{username}] 🔍 Browsing Explore page...")
-        driver.get(f"{INSTAGRAM_BASE_URL}/explore/")
-        human_delay(4, 7)
-        
-        # Scroll Explore for 30-60 seconds
-        scroll_start = time.time()
-        scroll_duration = random.randint(30, 60)
-        while time.time() - scroll_start < scroll_duration:
-            if stop_event and stop_event.is_set():
-                break
-            _scroll_home_feed(driver)
-            human_delay(3, 6)
-            
-        if stop_event and stop_event.is_set():
-            return
-
-        # 3. Open a random Reel on Explore
-        log_and_telegram(f"[{username}] 🎞️ Opening a random Reel on Explore...")
-        reel_links = driver.find_elements(By.XPATH, "//a[contains(@href, '/reel/') or contains(@href, '/p/')]")
-        if reel_links:
-            target_reel = random.choice(reel_links[:12]) # Pick from top 12
-            try:
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target_reel)
-                human_delay(1, 2)
-                _safe_click(driver, target_reel)
-                human_delay(15, 30) # "Watch" for a bit
-                
-                # Close it
-                _close_post_view_and_return_feed(driver)
-            except Exception:
-                pass
-                
-    except Exception as e:
-        logger.debug(f"[{username}] Error during explore break activity: {e}")
-
-    log_and_telegram(f"[{username}] ✅ Break finished, returning to work.")
-
-
-def _open_comment_popup_from_feed(driver, post_element) -> bool:
-    """Open post popup from home feed by clicking the Comment icon first."""
-    comment_trigger_xpaths = _svg_button_xpaths("Comment", absolute=False)
-
-    def _is_popup_or_post_open() -> bool:
-        if _find_post_dialog_container(driver) is not None:
-            return True
-
-        try:
-            current_url = str(driver.current_url or "")
-        except Exception:
-            current_url = ""
-
-        return "/p/" in current_url or "/reel/" in current_url
-
-    for xpath in comment_trigger_xpaths:
-        try:
-            triggers = post_element.find_elements(By.XPATH, xpath)
-        except Exception:
-            triggers = []
-
-        for trigger in triggers:
-            try:
-                if not trigger.is_displayed():
-                    continue
-            except Exception:
-                continue
-
-            if not _safe_click(driver, trigger):
-                continue
-
-            human_delay(0.4, 0.8)
-            timeout_at = time.time() + 3.0
-            while time.time() < timeout_at:
-                if _is_popup_or_post_open():
-                    return True
-                time.sleep(0.2)
-
-            if _is_popup_or_post_open():
-                return True
-
-    # Fallback: open from post permalink if Comment icon click did not open the popup.
-    return _open_post_view_from_feed(driver, post_element)
-
-
-def _open_post_view_from_feed(driver, post_element) -> bool:
-    """Open the current feed post view (modal/page) before interacting."""
-    try:
-        url_before = str(driver.current_url or "")
-    except Exception:
-        url_before = ""
-
-    post_open_xpaths = [
-        ".//a[contains(@href, '/p/') or contains(@href, '/reel/')]",
-    ]
-
-    for xpath in post_open_xpaths:
-        try:
-            links = post_element.find_elements(By.XPATH, xpath)
-        except Exception:
-            links = []
-
-        for link in links:
-            try:
-                if not link.is_displayed():
-                    continue
-            except Exception:
-                continue
-
-            if not _safe_click(driver, link):
-                continue
-
-            human_delay(0.5, 1.0)
-            if _find_post_dialog_container(driver) is not None:
-                return True
-
-            try:
-                url_after = str(driver.current_url or "")
-            except Exception:
-                url_after = ""
-
-            if url_after and url_after != url_before and ("/p/" in url_after or "/reel/" in url_after):
-                return True
-
-            return True
-
-    return False
-
-
-def _find_post_dialog_container(driver):
-    """Return active Instagram dialog container for a post view if present."""
-    dialog_xpaths = [
-        "//div[@role='dialog'][.//*[name()='svg' and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]]",
-        "//div[@role='dialog'][.//article]",
-    ]
-
-    for xpath in dialog_xpaths:
-        try:
-            dialogs = driver.find_elements(By.XPATH, xpath)
-        except Exception:
-            dialogs = []
-
-        for dialog in reversed(dialogs):
-            try:
-                if dialog.is_displayed():
-                    return dialog
-            except Exception:
-                continue
-
-    return None
-
-
-def _resolve_post_interaction_scope(driver, fallback_post_element):
-    """Use modal article when open, otherwise fallback to feed article element."""
-    dialog = _find_post_dialog_container(driver)
-    if dialog is None:
-        return fallback_post_element
-    
-    # Return the entire dialog to ensure buttons/comments outside the <article> are found
-    return dialog
-
-
-def _click_post_close_button(driver) -> bool:
-    """Click the Close (cross) button on an open post dialog."""
-    close_button_xpaths = [
-        "//div[@role='dialog']//*[name()='svg' and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]/ancestor::*[@role='button'][1]",
-        "//*[name()='svg' and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'close')]/ancestor::*[@role='button'][1]",
-    ]
-
-    for xpath in close_button_xpaths:
-        try:
-            close_buttons = driver.find_elements(By.XPATH, xpath)
-        except Exception:
-            close_buttons = []
-
-        for close_button in close_buttons:
-            try:
-                if not close_button.is_displayed():
-                    continue
-            except Exception:
-                continue
-
-            if _safe_click(driver, close_button):
-                human_delay(0.3, 0.6)
-                return True
-
-    return False
-
-
-def _close_post_view_and_return_feed(driver):
-    """Close modal post view and keep automation on the home feed."""
-    # 1. Try Clicking the Close button
-    if _click_post_close_button(driver):
-        return True
-
-    # 2. Try ESC key
-    try:
-        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        human_delay(0.5, 1.0)
-        # Check if dialog still exists (best effort)
-        if _find_post_dialog_container(driver) is None:
-            return True
-    except Exception:
-        pass
-
-    # 3. Try Browser Back (only if we navigated away from root)
-    try:
-        current_url = str(driver.current_url or "")
-        if "/p/" in current_url or "/reel/" in current_url:
-            driver.back()
-            human_delay(1.5, 2.5)
-            new_url = str(driver.current_url or "")
-            if "/p/" not in new_url and "/reel/" not in new_url:
-                return True
-    except Exception:
-        pass
-
-    # 4. Last resort: Force Home URL if still on a post page
-    try:
-        current_url = str(driver.current_url or "")
-        if "/p/" in current_url or "/reel/" in current_url or _find_post_dialog_container(driver):
-            driver.get(f"{INSTAGRAM_BASE_URL}/")
-            human_delay(3, 5)
-            return True
-    except Exception:
-        pass
-
-    return False
-
-
-_XPATH_UPPER_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-_XPATH_LOWER_ALPHA = "abcdefghijklmnopqrstuvwxyz"
-
-
-def _svg_label_predicate(label: str) -> str:
-    """Build an XPath predicate for SVG icons using aria-label or <title> text."""
-    normalized_label = str(label or "").strip().lower()
-    return (
-        "("
-        f"translate(normalize-space(@aria-label), '{_XPATH_UPPER_ALPHA}', '{_XPATH_LOWER_ALPHA}')='{normalized_label}' "
-        "or "
-        f"./*[local-name()='title' and translate(normalize-space(string(.)), '{_XPATH_UPPER_ALPHA}', '{_XPATH_LOWER_ALPHA}')='{normalized_label}']"
-        ")"
-    )
-
-
-def _svg_button_xpaths(label: str, absolute: bool = False) -> list:
-    """Return XPath candidates for clickable controls wrapping a labeled SVG icon."""
-    prefix = "//" if absolute else ".//"
-    svg_predicate = _svg_label_predicate(label)
-    clickable_predicate = "@role='button' or @role='link' or local-name()='button'"
-
-    return [
-        f"{prefix}article//section//*[local-name()='svg' and {svg_predicate}]/ancestor::*[{clickable_predicate}][1]",
-        f"{prefix}section//*[local-name()='svg' and {svg_predicate}]/ancestor::*[{clickable_predicate}][1]",
-        f"{prefix}*[{clickable_predicate}][.//*[local-name()='svg' and {svg_predicate}] ]",
-        f"{prefix}//*[local-name()='svg' and {svg_predicate}]/ancestor::*[{clickable_predicate}][1]",
-        f"{prefix}//*[local-name()='svg' and {svg_predicate}]",
-    ]
-
-
-def _scope_has_svg_label(scope, label: str) -> bool:
-    """Return True when the given scope contains an SVG icon with the requested label."""
-    if scope is None:
-        return False
-
-    svg_predicate = _svg_label_predicate(label)
-    try:
-        icons = scope.find_elements(By.XPATH, f".//*[local-name()='svg' and {svg_predicate}]")
-        return bool(icons)
-    except Exception:
-        return False
-
-
-def _dialog_has_svg_label(driver, label: str) -> bool:
-    """Return True when any open dialog contains the requested labeled SVG icon."""
-    svg_predicate = _svg_label_predicate(label)
-    try:
-        icons = driver.find_elements(
-            By.XPATH,
-            f"//div[@role='dialog']//*[local-name()='svg' and {svg_predicate}]",
-        )
-        return bool(icons)
-    except Exception:
-        return False
-
-
-def _safe_click(driver, element) -> bool:
-    """Best-effort click helper using JS fallback for unreliable clickable states."""
-    if element is None:
-        return False
-
-    try:
-        driver.execute_script(
-            "arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});",
-            element,
-        )
-    except Exception:
-        pass
-
-    try:
-        driver.execute_script("arguments[0].click();", element)
-        return True
-    except Exception:
-        try:
-            element.click()
-            return True
-        except Exception:
-            try:
-                driver.execute_script(
-                    "arguments[0].dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));",
-                    element,
-                )
-                return True
-            except Exception:
-                return False
-
-
-def _like_home_feed_post(driver, post_element) -> bool:
-    """Like a home feed post when it is currently unliked."""
-    # Check if already liked.
-    if _scope_has_svg_label(post_element, "Unlike"):
-        logger.debug("[Like] Post already liked (found Unlike icon in scope)")
-        return False
-
-    if _dialog_has_svg_label(driver, "Unlike"):
-        logger.debug("[Like] Post already liked (found Unlike icon in dialog)")
-        return False
-
-    like_button_xpaths = _svg_button_xpaths("Like", absolute=False)
-
-    # Search within post element first
-    for xpath in like_button_xpaths:
-        try:
-            candidates = post_element.find_elements(By.XPATH, xpath)
-            for candidate in candidates:
-                try:
-                    if candidate.is_displayed():
-                        if _safe_click(driver, candidate):
-                            logger.debug("[Like] Clicked like button (post scope)")
-                            return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    # Fallback: search globally (useful when in dialog/modal view).
-    global_like_xpaths = []
-    for relative_xpath in _svg_button_xpaths("Like", absolute=False):
-        if relative_xpath.startswith(".//"):
-            global_like_xpaths.append(f"//div[@role='dialog']{relative_xpath[1:]}")
-    global_like_xpaths.extend(_svg_button_xpaths("Like", absolute=True))
-
-    for xpath in global_like_xpaths:
-        try:
-            candidates = driver.find_elements(By.XPATH, xpath)
-            for candidate in candidates:
-                try:
-                    if candidate.is_displayed():
-                        if _safe_click(driver, candidate):
-                            logger.debug("[Like] Clicked like button (global scope)")
-                            return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    logger.debug("[Like] Could not find any clickable Like button")
-    return False
-
-
-def _comment_on_home_feed_post(driver, post_element, comment_text: str, open_comment_section: bool = True) -> bool:
-    """Leave a comment on a feed post/popup using the visible comment input.
-
-    Instagram replaces the textarea element when you first click it,
-    so we click once, wait, then re-query the DOM for the fresh textarea.
-    """
-    message = str(comment_text or "").strip()
-    if not message:
-        return False
-
-    if open_comment_section:
-        # 1. Click the comment icon to open the section.
-        comment_trigger_xpaths = _svg_button_xpaths("Comment", absolute=False)
-        clicked_trigger = False
-
-        for xpath in comment_trigger_xpaths:
-            try:
-                triggers = post_element.find_elements(By.XPATH, xpath)
-                for trigger in triggers:
-                    if not trigger.is_displayed():
-                        continue
-
-                    if _safe_click(driver, trigger):
-                        clicked_trigger = True
-                        human_delay(0.5, 1.0)
-                        break
-            except Exception:
-                pass
-
-            if clicked_trigger:
-                break
-
-    relative_input_xpaths = [
-        ".//form//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
-        ".//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
-        ".//textarea[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
-        ".//form//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
-        ".//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
-        ".//form//textarea",
-        ".//textarea",
-    ]
-
-    global_input_xpaths = [
-        "//form//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
-        "//textarea[contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
-        "//textarea[contains(translate(@placeholder, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add a comment')]",
-        "//form//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
-        "//*[@role='textbox' and (@contenteditable='true' or @contenteditable='plaintext-only') and contains(translate(@aria-label, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'comment')]",
-        "//form//textarea",
-        "//textarea",
-    ]
-
-    def _find_visible_comment_input():
-        search_scopes = [post_element]
-        dialog_scope = _find_post_dialog_container(driver)
-        if dialog_scope is not None and dialog_scope is not post_element:
-            search_scopes.append(dialog_scope)
-        if post_element is not driver:
-            search_scopes.append(driver)
-
-        for scope in search_scopes:
-            xpaths = global_input_xpaths if scope is driver else relative_input_xpaths
-            for xpath in xpaths:
-                try:
-                    elements = scope.find_elements(By.XPATH, xpath)
-                except Exception:
-                    elements = []
-
-                for el in elements:
-                    try:
-                        if not el.is_displayed():
-                            continue
-                        if str(el.get_attribute("aria-hidden") or "").strip().lower() == "true":
-                            continue
-                        if str(el.get_attribute("disabled") or "").strip().lower() in ("true", "disabled"):
-                            continue
-                        return el
-                    except Exception:
-                        continue
-
-        return None
-
-    # 2. Find the initial textarea and click it (Instagram may swap it).
-    comment_input = _find_visible_comment_input()
-    if not comment_input:
-        return False
-
-    try:
-        try:
-            comment_input.click()
-        except Exception:
-            _safe_click(driver, comment_input)
-    except Exception:
-        pass
-
-    # 3. Wait for the swap, then re-find
-    human_delay(0.8, 1.2)
-    comment_input = _find_visible_comment_input()
-    if not comment_input:
-        return False
-
-    # 4. Click the new textarea, type, and submit
-    try:
-        try:
-            comment_input.click()
-        except Exception:
-            _safe_click(driver, comment_input)
-        human_delay(0.2, 0.4)
-
-        try:
-            comment_input.clear()
-        except Exception:
-            pass
-
-        type_like_human(comment_input, message)
-        human_delay(0.8, 1.2)
-
-        # Always submit with Enter first (more reliable in Instagram's dynamic composer).
-        if _submit_comment_with_enter(driver, comment_input, expected_message=message):
-            human_delay(2.0, 3.0)
-            return True
-
-        # Fallback: click Post button if Enter did not submit.
-        post_xpaths = [
-            "//form//*[@role='button' and (normalize-space()='Post' or normalize-space()='post' or .//span[normalize-space()='Post'] or .//span[normalize-space()='post'] or .//div[normalize-space()='Post'])]",
-            "//form//button[@type='submit' or normalize-space()='Post' or normalize-space()='post' or @aria-label='Post']",
-            "//*[@role='button' and (normalize-space()='Post' or normalize-space()='post' or .//span[normalize-space()='Post'] or .//span[normalize-space()='post'])]",
-            "//button[@type='submit' or normalize-space()='Post' or normalize-space()='post' or @aria-label='Post']",
-        ]
-
-        for xpath in post_xpaths:
-            try:
-                buttons = driver.find_elements(By.XPATH, xpath)
-            except Exception:
-                buttons = []
-
-            for btn in buttons:
-                try:
-                    if not btn.is_displayed():
-                        continue
-                    if str(btn.get_attribute("aria-disabled") or "").strip().lower() == "true":
-                        continue
-
-                    if _safe_click(driver, btn):
-                        human_delay(1.2, 2.0)
-                        try:
-                            remaining_text = str(comment_input.get_attribute("value") or "").strip()
-                            if not remaining_text:
-                                remaining_text = str(comment_input.get_attribute("textContent") or "").strip()
-                        except Exception:
-                            return True
-
-                        if not remaining_text or remaining_text.lower() != message.lower():
-                            return True
-                except Exception:
-                    continue
-
-        return _submit_comment_with_enter(driver, comment_input, expected_message=message)
-    except Exception as e:
-        logger.debug(f"[Comment] Failed to post comment: {e}")
-        return False
-
-
-def _scroll_home_feed(driver):
-    """Scroll feed down by a random amount to load new posts."""
-    scroll_amount = random.randint(650, 1250)
-    human_scroll(driver, scroll_amount)
 
 
 def _dm_list(
@@ -3490,25 +2191,21 @@ def _dm_list(
         if _check_for_challenges_and_alert(driver, sender, context="during DM session"):
             break
 
-        # Optional human-like break after 3 DMs.
+        # Optional pause after 3 DMs.
         if event_status == "sent":
-            if not _is_dm_other_engagement_enabled():
-                if isinstance(dm_batch_state, dict):
+            if isinstance(dm_batch_state, dict):
+                current_c = int(dm_batch_state.get("sent_since_human_break", 0) or 0) + 1
+                dm_batch_state["sent_since_human_break"] = current_c
+                if current_c >= break_threshold:
+                    log_and_telegram(f"[{sender}] ☕ Taking a short break after {break_threshold} DMs...")
+                    _interruptible_sleep(random.randint(30, 60), stop_event=stop_event)
                     dm_batch_state["sent_since_human_break"] = 0
-                sent_since_break = 0
             else:
-                if isinstance(dm_batch_state, dict):
-                    current_c = int(dm_batch_state.get("sent_since_human_break", 0) or 0) + 1
-                    dm_batch_state["sent_since_human_break"] = current_c
-                    if current_c >= break_threshold:
-                        _do_human_like_break(driver, sender, stop_event=stop_event)
-                        dm_batch_state["sent_since_human_break"] = 0
-                else:
-                    # Fallback if no batch state
-                    sent_since_break += 1
-                    if sent_since_break >= break_threshold:
-                        _do_human_like_break(driver, sender, stop_event=stop_event)
-                        sent_since_break = 0
+                sent_since_break += 1
+                if sent_since_break >= break_threshold:
+                    log_and_telegram(f"[{sender}] ☕ Taking a short break after {break_threshold} DMs...")
+                    _interruptible_sleep(random.randint(30, 60), stop_event=stop_event)
+                    sent_since_break = 0
 
         # Random delay between DMs
         if sent < max_dms and target_user != usernames[-1]:
