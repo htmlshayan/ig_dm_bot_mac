@@ -1896,24 +1896,19 @@ def _process_model(
 
 
 def _build_engagement_schedule(models: list) -> list:
-    """Build a randomized interleaved engagement schedule.
+    """Build a randomized engagement schedule focusing only on model targets.
 
-    Instead of processing each model sequentially to completion,
-    this creates a human-like pattern that alternates between
-    model profile visits, home feed sessions, and idle browsing.
-
-    Returns a list of action tuples:
-      ("model", model_name)      - visit model profile, interact with a few users
-      ("home_feed", post_count)  - scroll home feed, interact with N posts
-      ("idle", None)             - idle browsing on home feed (no interactions)
+    This version removes home feed sessions and idle browsing as requested,
+    focusing entirely on model profile visits.
     """
     if not models:
-        # No models configured — just do home feed sessions
-        return [("home_feed", random.randint(5, 10)) for _ in range(random.randint(4, 7))]
+        # If no models, we still need something to do, but user requested no home feed.
+        # We'll return an empty list or a log warning.
+        return []
 
     schedule = []
 
-    # Each model gets 2-4 short visits instead of 1 long one
+    # Each model gets multiple short visits
     model_visits = []
     for model in models:
         num_visits = random.randint(2, 4)
@@ -1922,29 +1917,10 @@ def _build_engagement_schedule(models: list) -> list:
 
     random.shuffle(model_visits)
 
-    for i, model in enumerate(model_visits):
-        # ~50% chance: add a home feed session before the model visit
-        if random.random() < 0.5:
-            home_posts = random.randint(3, 8)
-            schedule.append(("home_feed", home_posts))
-
-        # Add the model visit
+    for model in model_visits:
         schedule.append(("model", model))
 
-        # ~10% chance: add an idle browse after a model visit
-        if random.random() < 0.10:
-            schedule.append(("idle", None))
-
-        # Every 2-3 model visits, force a home feed session to break up the pattern
-        if (i + 1) % random.randint(2, 3) == 0:
-            home_posts = random.randint(3, 8)
-            schedule.append(("home_feed", home_posts))
-
-    # End with a short home feed session if we didn't already
-    if schedule and schedule[-1][0] != "home_feed":
-        schedule.append(("home_feed", random.randint(3, 6)))
-
-    # De-duplicate consecutive visits to the same model by inserting a home feed break
+    # De-duplicate consecutive visits to the same model
     deduped = []
     for action in schedule:
         if (
@@ -1953,7 +1929,7 @@ def _build_engagement_schedule(models: list) -> list:
             and deduped[-1][0] == "model"
             and deduped[-1][1] == action[1]
         ):
-            deduped.append(("home_feed", random.randint(3, 5)))
+            continue # Skip consecutive visits to the same model
         deduped.append(action)
 
     return deduped
@@ -2353,8 +2329,10 @@ def _process_target_engagement(
     """
     Engagement flow:
     1. Scrape posts from model.
-    2. For each post, scrape commenters < 4h old.
-    3. Like their latest post.
+    2. For each post:
+       a. Like the post itself.
+       b. Like comments on the post.
+       c. (Optional) Like latest posts of recent commenters.
     """
     username = account["username"]
     db_max_users = _setting_int_default("TARGET_ENGAGEMENT_MAX_USERS_PER_MODEL", 20)
@@ -2365,7 +2343,7 @@ def _process_target_engagement(
     if already_engaged is None:
         already_engaged = set()
 
-    log_and_telegram(f"[{username}] 🎯 Starting engagement for @{model_username} (max {max_users} users, < {max_age_hours}h)")
+    log_and_telegram(f"[{username}] 🎯 Starting engagement for @{model_username} (max {max_users} interactions, < {max_age_hours}h)")
 
     from core.scraper import get_recent_posts, get_recent_commenters
     posts = get_recent_posts(driver, model_username)
@@ -2374,52 +2352,85 @@ def _process_target_engagement(
         log_and_telegram(f"[{username}] ⚠️ Profile @{model_username} is unavailable. Skipping engagement.")
         return 0
     
-    # We only care about posts that could have recent comments
-    # Usually posts under 48h are enough to check.
+    # Process each post
     for post in posts:
         if stop_event and stop_event.is_set():
             break
         if engaged_count >= max_users:
             break
 
-        # Visit post to check age if needed, but get_recent_commenters handles its own navigation
-        log_and_telegram(f"[{username}] 🔍 Checking post for recent comments: {post['url'][-15:]}")
+        post_url = post["url"]
+        log_and_telegram(f"[{username}] 🔍 Engaging with post: {post_url[-15:]}")
         
-        recent_commenters = get_recent_commenters(driver, post["url"], max_age_hours, model_username)
-        
-        for target_user in recent_commenters:
-            if stop_event and stop_event.is_set():
-                break
-            if engaged_count >= max_users:
-                break
-            
-            if target_user in already_engaged:
-                continue
+        driver.get(post_url)
+        human_delay(3, 5)
 
-            # Check global dedupe if coordinator exists
-            if coordinator and coordinator.enabled:
-                if coordinator.is_target_dmd(target_user): # Reuse DM dedupe logic
-                    already_engaged.add(target_user)
+        # 1. Like the post itself
+        if _like_home_feed_post(driver, driver):
+            telegram_bot.stats["likes_sent"] += 1
+            database.log_engagement(username, model_username, 'like')
+            log_and_telegram(f"[{username}] ❤️ Liked model post")
+            engaged_count += 1
+            if _sleep_after_comment_like_action(stop_event=stop_event):
+                break
+
+        # 1b. Comment on the post itself (if pool exists)
+        comment_pool = database.get_comments()
+        if comment_pool and random.random() < 0.4: # 40% chance to comment like in home feed mode
+            comment_text = random.choice(comment_pool)
+            if _comment_on_home_feed_post(driver, driver, comment_text, open_comment_section=False):
+                telegram_bot.stats["comments_sent"] += 1
+                database.log_engagement(username, model_username, 'comment')
+                log_and_telegram(f"[{username}] 💬 Commented on model post")
+                engaged_count += 1
+                if _sleep_after_comment_like_action(stop_event=stop_event):
+                    break
+
+        # 2. Like comments on the post
+        comment_likes = _like_comments_on_current_post(driver, stop_event=stop_event, max_likes=random.randint(3, 6))
+        engaged_count += comment_likes
+        
+        if engaged_count >= max_users:
+            break
+
+        # 3. (Legacy) Like latest posts of recent commenters
+        # Only do this if we still have quota and it's enabled
+        if engaged_count < max_users:
+            recent_commenters = get_recent_commenters(driver, post_url, max_age_hours, model_username)
+            
+            for target_user in recent_commenters:
+                if stop_event and stop_event.is_set():
+                    break
+                if engaged_count >= max_users:
+                    break
+                
+                if target_user in already_engaged:
                     continue
 
-            log_and_telegram(f"[{username}] 👤 Engaging with @{target_user}...")
-            
-            success = _like_user_latest_post(driver, target_user)
-            
-            # Check for suspension/challenges immediately after action
-            if _check_for_challenges_and_alert(driver, username, context="during target engagement"):
-                return engaged_count
+                # Check global dedupe if coordinator exists
+                if coordinator and coordinator.enabled:
+                    if coordinator.is_target_dmd(target_user): # Reuse DM dedupe logic
+                        already_engaged.add(target_user)
+                        continue
 
-            if success:
-                engaged_count += 1
-                already_engaged.add(target_user)
-                telegram_bot.stats["likes_sent"] += 1
-                # Log to DB to prevent repeat engagement (reuse DM log for simplicity or add new)
-                database.log_dm(target_user) 
-                database.log_engagement(username, target_user, 'like')
-                log_and_telegram(f"[{username}] ❤️ Liked latest post for @{target_user} ({engaged_count}/{max_users})")
-            
-            human_delay(5, 10)
+                log_and_telegram(f"[{username}] 👤 Engaging with @{target_user}...")
+                
+                success = _like_user_latest_post(driver, target_user)
+                
+                # Check for suspension/challenges immediately after action
+                if _check_for_challenges_and_alert(driver, username, context="during target engagement"):
+                    return engaged_count
+
+                if success:
+                    engaged_count += 1
+                    already_engaged.add(target_user)
+                    telegram_bot.stats["likes_sent"] += 1
+                    # Log to DB to prevent repeat engagement (reuse DM log for simplicity or add new)
+                    database.log_dm(target_user) 
+                    database.log_engagement(username, target_user, 'like')
+                    log_and_telegram(f"[{username}] ❤️ Liked latest post for @{target_user} ({engaged_count}/{max_users})")
+                
+                human_delay(5, 10)
 
     log_and_telegram(f"[{username}] ✅ Engagement complete for @{model_username}: {engaged_count} users engaged")
     return engaged_count
@@ -2542,6 +2553,111 @@ def _dismiss_home_feed_dialogs(driver):
                 human_delay(0.2, 0.5)
         except Exception:
             continue
+
+
+def _like_comments_on_current_post(driver, stop_event=None, max_likes: int = 10) -> int:
+    """
+    Find and like comments on the currently loaded post.
+    """
+    likes_done = 0
+    
+    # 1. Try to load more comments first
+    for _ in range(2):
+        if stop_event and stop_event.is_set():
+            break
+        if not _click_load_more_comments(driver):
+            break
+        human_delay(1.5, 2.5)
+
+    # 2. Find Like buttons for comments
+    # Selectors based on user provided SVG (height=12) and container
+    comment_like_xpaths = [
+        "//ul[contains(@class, '_a9z6')]//div[@role='button'][.//*[local-name()='svg' and @aria-label='Like' and @height='12']]",
+        "//span[contains(@class, '_a9zu')]//div[@role='button'][.//*[local-name()='svg' and @aria-label='Like']]",
+        "//div[@role='button'][.//*[local-name()='svg' and @aria-label='Like' and @height='12']]",
+    ]
+
+    seen_buttons = set()
+    
+    for _ in range(3): # Up to 3 batches of liking
+        if (stop_event and stop_event.is_set()) or likes_done >= max_likes:
+            break
+            
+        found_buttons = []
+        for xpath in comment_like_xpaths:
+            try:
+                elements = driver.find_elements(By.XPATH, xpath)
+                for el in elements:
+                    if el not in seen_buttons:
+                        found_buttons.append(el)
+            except Exception:
+                continue
+        
+        if not found_buttons:
+            # Try loading more one last time
+            if _click_load_more_comments(driver):
+                human_delay(1.5, 2.5)
+                continue
+            break
+
+        random.shuffle(found_buttons)
+        
+        for btn in found_buttons:
+            if (stop_event and stop_event.is_set()) or likes_done >= max_likes:
+                break
+            
+            try:
+                # Scroll to button
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", btn)
+                human_delay(0.5, 1.0)
+                
+                # Check if already liked (aria-label might have changed if we are too fast, but usually it's okay)
+                # We double check the SVG inside
+                try:
+                    svg = btn.find_element(By.TAG_NAME, "svg")
+                    label = svg.get_attribute("aria-label")
+                    if label == "Unlike":
+                        seen_buttons.add(btn)
+                        continue
+                except Exception:
+                    pass
+
+                if _safe_click(driver, btn):
+                    likes_done += 1
+                    seen_buttons.add(btn)
+                    telegram_bot.stats["likes_sent"] += 1
+                    if _sleep_after_comment_like_action(stop_event=stop_event):
+                        return likes_done
+            except Exception:
+                continue
+        
+        # Scroll down slightly to trigger more comment loading
+        try:
+            driver.execute_script("window.scrollBy(0, 300);")
+            human_delay(1.0, 2.0)
+        except Exception:
+            pass
+
+    return likes_done
+
+
+def _click_load_more_comments(driver) -> bool:
+    """Click the 'Load more comments' button if visible."""
+    load_more_xpaths = [
+        "//button[contains(@class, '_abl-')][.//*[local-name()='svg' and @aria-label='Load more comments']]",
+        "//svg[@aria-label='Load more comments']/ancestor::button",
+        "//button[.//*[contains(text(), 'Load more comments')]]",
+    ]
+    
+    for xpath in load_more_xpaths:
+        try:
+            btn = driver.find_element(By.XPATH, xpath)
+            if btn.is_displayed():
+                if _safe_click(driver, btn):
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def _extract_home_feed_post_url(post_element) -> str:
