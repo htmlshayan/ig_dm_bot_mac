@@ -251,38 +251,52 @@ def _find_message_input(driver):
 
 
 def _send_message(driver, text_area) -> bool:
-    """Submit message using Enter key only (no Send button clicks)."""
+    """Submit message using Enter key or Send button fallback."""
     try:
-        text_area.click()
-    except Exception:
+        # Ensure focus before sending Enter
         try:
-            driver.execute_script("arguments[0].focus();", text_area)
+            text_area.click()
         except Exception:
-            pass
+            driver.execute_script("arguments[0].focus();", text_area)
+        human_delay(0.5, 1.0)
 
-    # Primary submit: Enter on message input
-    try:
+        # 1. Primary submit: Enter on message input
         text_area.send_keys(Keys.ENTER)
-        human_delay(2, 3)
-        return True
-    except Exception:
-        pass
+        human_delay(1.5, 2.5)
+        
+        # Check if text is still there (if so, Enter didn't work)
+        try:
+            val = text_area.text or text_area.get_attribute("value") or ""
+            if not val.strip():
+                return True # Looks like it's gone (sent)
+        except Exception:
+            return True # If we can't check, assume it might have worked or element changed
 
-    # Retry with RETURN on message input
-    try:
-        text_area.send_keys(Keys.RETURN)
-        human_delay(2, 3)
-        return True
-    except Exception:
-        pass
+        # 2. Try the 'Send' button explicitly
+        send_btn_xpaths = [
+            "//button[text()='Send']",
+            "//button[normalize-space()='Send']",
+            "//div[@role='button' and text()='Send']",
+            "//button[contains(@class, 'x1i10hfl') and text()='Send']"
+        ]
+        for xpath in send_btn_xpaths:
+            try:
+                btn = driver.find_element(By.XPATH, xpath)
+                if btn.is_displayed():
+                    driver.execute_script("arguments[0].click();", btn)
+                    human_delay(2, 3)
+                    return True
+            except Exception:
+                continue
 
-    # Last fallback: Enter on active element
-    try:
+        # 3. Fallback: Enter on active element
         active = driver.switch_to.active_element
         active.send_keys(Keys.ENTER)
         human_delay(2, 3)
         return True
-    except Exception:
+
+    except Exception as e:
+        logger.warning(f"[DM] Error in _send_message: {e}")
         return False
 
 

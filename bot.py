@@ -46,6 +46,7 @@ CLUSTER_NOTIFICATION_COOLDOWN_SEC = 24 * 60 * 60
 CLUSTER_NOTIFICATION_FALLBACK_BUCKET_SEC = 10 * 60
 INBOX_REPLIER_ENABLED_SETTING_KEY = "INBOX_REPLIER_ENABLED"
 DM_BATCH_PAUSE_ENABLED_SETTING_KEY = "DM_BATCH_PAUSE_ENABLED"
+DM_OTHER_ENGAGEMENT_ENABLED_SETTING_KEY = "DM_OTHER_ENGAGEMENT_ENABLED"
 DM_BATCH_SIZE = 10
 DM_BATCH_COOLDOWN_SECONDS = 5 * 60
 HEAVY_COMMENT_LIKING_MIN_POSTS = 180
@@ -88,6 +89,11 @@ def _setting_bool(key: str, default: bool = False) -> bool:
     if text in ("0", "false", "off", "no", "disable", "disabled", "", "none", "null"):
         return False
     return bool(default)
+
+
+def _is_dm_other_engagement_enabled() -> bool:
+    """Return True when optional engagement actions are enabled during DM runtime."""
+    return _setting_bool(DM_OTHER_ENGAGEMENT_ENABLED_SETTING_KEY, default=False)
 
 
 def _setting_int_default(key: str, default: int) -> int:
@@ -856,6 +862,10 @@ def run_bot(
         logger.info("Runtime mode active: randomized like-comment (home feed + target models)")
     else:
         logger.info("Runtime mode active: standard model DM flow")
+        logger.info(
+            "DM optional engagement actions: %s",
+            "enabled" if _is_dm_other_engagement_enabled() else "disabled",
+        )
 
     # Start Telegram
     telegram_bot.start_polling()
@@ -1073,8 +1083,9 @@ def run_bot(
                 continue
 
             try:
-                # Force initial human-like break for session warm-up (likes/comments on home feed)
-                _do_human_like_break(driver, username, stop_event=stop_event)
+                # Optional warm-up engagement in DM runtime.
+                if normalized_runtime_mode == "dm" and _is_dm_other_engagement_enabled():
+                    _do_human_like_break(driver, username, stop_event=stop_event)
 
                 # ── Interleaved Engagement Schedule ──
                 if (comment_liking_mode or target_engagement_mode) and engagement_schedule:
@@ -1760,8 +1771,8 @@ def _process_model(
     # Step 1: Get recent posts
     posts = get_recent_posts(driver, model_username)
     
-    # Warm up by interacting with model posts before Dming followers
-    if posts:
+    # Optional warm-up by interacting with model posts before DMing followers.
+    if posts and _is_dm_other_engagement_enabled():
         _engage_with_model_posts(driver, account, model_username, posts[:3], stop_event=stop_event)
 
     if not posts:
@@ -3230,20 +3241,25 @@ def _dm_list(
         if _check_for_challenges_and_alert(driver, sender, context="during DM session"):
             break
 
-        # Human-like break after 3 DMs
+        # Optional human-like break after 3 DMs.
         if event_status == "sent":
-            if isinstance(dm_batch_state, dict):
-                current_c = int(dm_batch_state.get("sent_since_human_break", 0) or 0) + 1
-                dm_batch_state["sent_since_human_break"] = current_c
-                if current_c >= break_threshold:
-                    _do_human_like_break(driver, sender, stop_event=stop_event)
+            if not _is_dm_other_engagement_enabled():
+                if isinstance(dm_batch_state, dict):
                     dm_batch_state["sent_since_human_break"] = 0
+                sent_since_break = 0
             else:
-                # Fallback if no batch state
-                sent_since_break += 1
-                if sent_since_break >= break_threshold:
-                    _do_human_like_break(driver, sender, stop_event=stop_event)
-                    sent_since_break = 0
+                if isinstance(dm_batch_state, dict):
+                    current_c = int(dm_batch_state.get("sent_since_human_break", 0) or 0) + 1
+                    dm_batch_state["sent_since_human_break"] = current_c
+                    if current_c >= break_threshold:
+                        _do_human_like_break(driver, sender, stop_event=stop_event)
+                        dm_batch_state["sent_since_human_break"] = 0
+                else:
+                    # Fallback if no batch state
+                    sent_since_break += 1
+                    if sent_since_break >= break_threshold:
+                        _do_human_like_break(driver, sender, stop_event=stop_event)
+                        sent_since_break = 0
 
         # Random delay between DMs
         if sent < max_dms and target_user != usernames[-1]:

@@ -92,6 +92,7 @@ DEFAULT_DB_SETTINGS = {
     "DM_DELAY_MIN": 3,
     "DM_DELAY_MAX": 7,
     "DM_BATCH_PAUSE_ENABLED": False,
+    "DM_OTHER_ENGAGEMENT_ENABLED": False,
     "DM_RANDOM_EMOJI_SUFFIX_ENABLED": False,
     "DM_RANDOM_EMOJI_SUFFIX_POOL": ["🙂", "😊", "😉", "✨", "🌸", "🙏"],
     "ACTION_DELAY_MIN": 2,
