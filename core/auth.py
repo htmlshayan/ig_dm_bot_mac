@@ -53,15 +53,50 @@ def human_delay(min_t=None, max_t=None):
 
 
 def type_like_human(element, text):
-    """Type text character by character with random delays."""
+    """Type text like a human: char by char, random delays, occasional typos/corrections."""
     typing_min = _setting_float("TYPING_DELAY_MIN")
     typing_max = _setting_float("TYPING_DELAY_MAX")
     if typing_max < typing_min:
         typing_min, typing_max = typing_max, typing_min
 
-    for char in text:
-        element.send_keys(char)
-        time.sleep(random.uniform(typing_min, typing_max))
+    typo_chance = 0.04  # 4% chance of a typo per character
+    
+    i = 0
+    text_str = str(text)
+    while i < len(text_str):
+        char = text_str[i]
+        
+        # Simulate typo (only on alphabetic characters for realism)
+        if char.isalpha() and random.random() < typo_chance:
+            # Type a nearby or random character
+            wrong_char = random.choice("abcdefghijklmnopqrstuvwxyz")
+            element.send_keys(wrong_char)
+            time.sleep(random.uniform(typing_min, typing_max * 1.2))
+            
+            # Pause as if "realizing" the mistake
+            if random.random() < 0.7:
+                time.sleep(random.uniform(0.2, 0.6))
+            
+            # Backspace to fix it
+            element.send_keys(Keys.BACKSPACE)
+            time.sleep(random.uniform(typing_min, typing_max))
+            
+            # Now type the correct one
+            element.send_keys(char)
+        else:
+            element.send_keys(char)
+            
+        # Random delay between characters
+        delay = random.uniform(typing_min, typing_max)
+        
+        # Occasional longer pause between words (space) or at the end of sentences
+        if char == ' ':
+            delay += random.uniform(0.05, 0.2)
+        elif char in ('.', '!', '?'):
+            delay += random.uniform(0.3, 0.7)
+            
+        time.sleep(delay)
+        i += 1
 
 
 def human_scroll(driver, distance):

@@ -205,19 +205,11 @@ def send_dm(driver, username: str, message: str) -> str:
 
         final_message = _with_random_emoji_suffix(message)
 
-        try:
-            # Avoid `pyperclip` system clipboard, as it requires OS window focus and overwrites user's clipboard.
-            # Instead, use seamless JS execCommand to paste text retaining emojis natively.
-            driver.execute_script(
-                "arguments[0].focus(); document.execCommand('insertText', false, arguments[1]);",
-                text_area, final_message
-            )
-            human_delay(1, 2)
-            logger.info(f"[DM] Message safely injected for @{username}")
-        except Exception as e:
-            logger.warning(f"[DM] Error injecting message: {e}. Falling back to typing.")
-            type_like_human(text_area, final_message)
-            human_delay(1, 2)
+        # User requested: "fully like human ... don't copy paste"
+        # We use advanced typing which includes simulated typos and backspacing.
+        type_like_human(text_area, final_message)
+        human_delay(1, 2)
+        logger.info(f"[DM] Message typed like human for @{username}")
 
         # Step 6: Submit using Enter key (more reliable than UI Send button in long runs)
         logger.info(f"[DM] Submitting message with Enter key...")

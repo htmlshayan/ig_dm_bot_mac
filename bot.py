@@ -1969,7 +1969,10 @@ def _process_comment_liking_model(
     """Run comment-liking flow on the Instagram home feed without sending DMs."""
     username = account["username"]
 
-    if not _setting_bool("COMMENT_LIKING_ENABLED", default=False):
+    # Bypass global toggle for internal human-like breaks or model warm-ups (max_posts < 5)
+    is_internal_safety = (model_username == "human_break") or (max_posts is not None and max_posts < 5)
+
+    if not _setting_bool("COMMENT_LIKING_ENABLED", default=False) and not is_internal_safety:
         log_and_telegram(
             f"[{username}] ⚠️ COMMENT_LIKING_ENABLED is OFF. Skipping comment-liking run for @{model_username}."
         )
